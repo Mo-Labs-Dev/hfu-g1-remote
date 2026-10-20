@@ -1,0 +1,2482 @@
+package com.example.g1remote
+
+import android.annotation.SuppressLint
+import android.content.pm.ActivityInfo
+import android.os.Bundle
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import com.example.g1remote.ui.theme.G1RemoteTheme
+import kotlinx.coroutines.delay
+
+private val Green = Color(0xFF087B39)
+private val Mint = Color(0xFFE7F5EC)
+private val Background = Color(0xFFF7F9F8)
+private val Dark = Color(0xFF172820)
+private val Muted = Color(0xFF64756B)
+private val BorderColor = Color(0xFFDCE7DF)
+
+private const val INSTITUTE =
+    "Institute for Product and Service Engineering"
+
+private const val IPSE_URL =
+    "https://www.hs-furtwangen.de/en/research/" +
+            "research-institutes/" +
+            "institute-for-product-and-service-engineering"
+
+// ======================================================
+// SCREENS
+// ======================================================
+
+private enum class Screen {
+    HOME,
+    LAB_GUIDE,
+    DESTINATION,
+    DEMONSTRATIONS,
+    DEMO_DETAIL,
+    LAB_MAP,
+    LAB_INFO,
+    WEBSITE,
+    NAVIGATION,
+    SAFETY_PRESENTATION,
+    OPERATOR,
+    VOICE
+}
+
+// NEW: Language selection
+private enum class AppLanguage {
+    EN,
+    DE
+}
+
+private fun tr(
+    language: AppLanguage,
+    english: String,
+    german: String
+): String {
+    return if (language == AppLanguage.EN) english else german
+}
+
+// ======================================================
+// DATA MODELS
+// ======================================================
+
+private data class VisitorItem(
+    val title: String,
+    val subtitle: String,
+    val description: String,
+    val image: Int
+)
+
+private data class SafetySlide(
+    val title: String,
+    val subtitle: String,
+    val narration: String,
+    val image: Int
+)
+
+// Example content only.
+// Replace with approved HFU laboratory safety
+// instructions before using this for real visitors.
+
+private val safetySlides = listOf(
+    SafetySlide(
+        title = "Welcome to HFU IPSE",
+        subtitle = "Laboratory Safety Introduction",
+        narration = "Welcome to the HFU laboratory. " +
+                "Before exploring the laboratory, " +
+                "please listen to these example safety instructions.",
+        image = R.drawable.robot
+    ),
+    SafetySlide(
+        title = "Follow Staff Instructions",
+        subtitle = "Your safety comes first",
+        narration = "Please follow the instructions " +
+                "given by authorized laboratory staff. " +
+                "If you are unsure about anything, " +
+                "ask your host before continuing.",
+        image = R.drawable.lab_info
+    ),
+    SafetySlide(
+        title = "Keep Clear of Moving Robots",
+        subtitle = "Respect the demonstration area",
+        narration = "Keep a safe distance from robots " +
+                "and other moving laboratory equipment. " +
+                "Do not enter a demonstration area " +
+                "unless authorized staff permit it.",
+        image = R.drawable.demonstration
+    ),
+    SafetySlide(
+        title = "Do Not Touch Equipment",
+        subtitle = "Only authorized operation",
+        narration = "Please do not touch, operate, " +
+                "or adjust laboratory equipment " +
+                "without permission from an authorized " +
+                "staff member.",
+        image = R.drawable.lab
+    ),
+    SafetySlide(
+        title = "Ask for Assistance",
+        subtitle = "Report concerns to laboratory staff",
+        narration = "If you notice an unsafe situation " +
+                "or need assistance, please inform " +
+                "the laboratory staff immediately.",
+        image = R.drawable.lab_guide
+    )
+)
+
+// ======================================================
+// LAB DESTINATIONS
+// ======================================================
+
+private val destinations = listOf(
+    VisitorItem(
+        "Coffee Machine",
+        "Visitor guidance",
+        "G1's planned guidance demonstration uses " +
+                "an approved route to the coffee machine. " +
+                "Physical movement is controlled by G1 Studio.",
+        R.drawable.lab_guide
+    ),
+    VisitorItem(
+        "3D Printing",
+        "Additive manufacturing",
+        "Explore the laboratory's 3D printing area.",
+        R.drawable.lab
+    ),
+    VisitorItem(
+        "Computer Area",
+        "Engineering workstations",
+        "Discover the engineering computer workstations.",
+        R.drawable.lab_info
+    )
+)
+
+// ======================================================
+// ROBOT DEMONSTRATIONS
+// ======================================================
+
+private val demonstrations = listOf(
+    VisitorItem(
+        "Robot Introduction",
+        "Meet Unitree G1",
+        "Learn about the humanoid robot and " +
+                "the G1 Studio visitor experience.",
+        R.drawable.robot
+    ),
+    VisitorItem(
+        "Visitor Guidance",
+        "Coffee machine demonstration",
+        "A planned supervised demonstration in which " +
+                "G1 guides a visitor along a predefined route.",
+        R.drawable.lab_guide
+    ),
+    VisitorItem(
+        "Walking Demonstration",
+        "Humanoid locomotion",
+        "Learn about controlled humanoid locomotion.",
+        R.drawable.demonstration
+    ),
+    VisitorItem(
+        "Voice Interaction",
+        "Talk to G1",
+        "Discover the planned voice interaction system.",
+        R.drawable.robot2
+    )
+)
+
+// ======================================================
+// MAIN ACTIVITY
+// ======================================================
+
+class MainActivity : ComponentActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        requestedOrientation =
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+
+        enableEdgeToEdge()
+
+        setContent {
+            G1RemoteTheme {
+                MaterialTheme(
+                    colorScheme = lightColorScheme(
+                        primary = Green,
+                        background = Background,
+                        surface = Color.White
+                    )
+                ) {
+                    G1RemoteApp()
+                }
+            }
+        }
+    }
+}
+
+// ======================================================
+// APP NAVIGATION
+// ======================================================
+
+@Composable
+private fun G1RemoteApp() {
+
+    var screen by remember {
+        mutableStateOf(Screen.HOME)
+    }
+
+    // NEW: English / German
+    var language by remember {
+        mutableStateOf(AppLanguage.EN)
+    }
+
+    var selectedDestination by remember {
+        mutableStateOf(destinations.first())
+    }
+
+    var selectedDemo by remember {
+        mutableStateOf(demonstrations.first())
+    }
+
+    val home: () -> Unit = {
+        screen = Screen.HOME
+    }
+
+    val back: () -> Unit = {
+        screen = when (screen) {
+            Screen.DESTINATION -> Screen.LAB_GUIDE
+            Screen.DEMO_DETAIL -> Screen.DEMONSTRATIONS
+            Screen.NAVIGATION -> Screen.DESTINATION
+            Screen.WEBSITE -> Screen.LAB_INFO
+            else -> Screen.HOME
+        }
+    }
+
+    BackHandler(
+        enabled = screen != Screen.HOME
+    ) {
+        back()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Background)
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+    ) {
+
+        if (
+            screen != Screen.WEBSITE &&
+            screen != Screen.SAFETY_PRESENTATION
+        ) {
+            RemoteHeader(
+                isHome = screen == Screen.HOME,
+                language = language,
+                onLanguageChange = {
+                    language = it
+                },
+                onHome = home,
+                onOperator = {
+                    screen = Screen.OPERATOR
+                }
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            when (screen) {
+
+                Screen.HOME -> HomeScreen(
+                    language = language,
+                    onNavigate = {
+                        screen = it
+                    }
+                )
+
+                Screen.SAFETY_PRESENTATION ->
+                    SafetyPresentationScreen(
+                        onHome = home
+                    )
+
+                Screen.LAB_GUIDE -> CatalogScreen(
+                    title = "Lab Guide",
+                    subtitle = "Where would you like to go?",
+                    items = destinations,
+                    onBack = back,
+                    onSelect = {
+                        selectedDestination = it
+                        screen = Screen.DESTINATION
+                    }
+                )
+
+                Screen.DESTINATION -> DetailScreen(
+                    item = selectedDestination,
+                    onBack = back,
+                    actionLabel =
+                        if (
+                            selectedDestination.title ==
+                            "Coffee Machine"
+                        ) {
+                            "Preview Navigation"
+                        } else {
+                            null
+                        },
+                    onAction = {
+                        screen = Screen.NAVIGATION
+                    }
+                )
+
+                Screen.DEMONSTRATIONS -> CatalogScreen(
+                    title = "Robot Demonstrations",
+                    subtitle = "Discover the G1 visitor experience",
+                    items = demonstrations,
+                    onBack = back,
+                    onSelect = {
+                        selectedDemo = it
+                        screen = Screen.DEMO_DETAIL
+                    }
+                )
+
+                Screen.DEMO_DETAIL -> DetailScreen(
+                    item = selectedDemo,
+                    onBack = back,
+                    actionLabel = null,
+                    onAction = {}
+                )
+
+                Screen.LAB_MAP -> LabMapScreen(
+                    onBack = back
+                )
+
+                Screen.LAB_INFO -> LabInfoScreen(
+                    onBack = back,
+                    onWebsite = {
+                        screen = Screen.WEBSITE
+                    }
+                )
+
+                Screen.WEBSITE -> FullScreenWebsite(
+                    onHome = home,
+                    onBack = back
+                )
+
+                Screen.NAVIGATION -> NavigationPreview(
+                    onBack = back
+                )
+
+                // NEW: Talk to G1
+                Screen.VOICE -> TalkToG1Screen(
+                    language = language,
+                    onBack = back
+                )
+
+                // Existing operator control remains.
+                Screen.OPERATOR -> G1RemoteOperatorPreviewScreen(
+                    onBack = back,
+                    onHome = home
+                )
+            }
+        }
+    }
+}
+
+// ======================================================
+// ORIGINAL HEADER + LANGUAGE SELECTOR
+// ======================================================
+
+@Composable
+private fun RemoteHeader(
+    isHome: Boolean,
+    language: AppLanguage,
+    onLanguageChange: (AppLanguage) -> Unit,
+    onHome: () -> Unit,
+    onOperator: () -> Unit
+) {
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(66.dp)
+            .background(Color(0xFFF0F3F1))
+            .padding(horizontal = 18.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+
+        Image(
+            painter = painterResource(R.drawable.hfu_logo),
+            contentDescription = "HFU",
+            modifier = Modifier
+                .width(135.dp)
+                .height(48.dp),
+            contentScale = ContentScale.Fit
+        )
+
+        Spacer(Modifier.width(15.dp))
+
+        Column(
+            modifier = Modifier.weight(1f)
+        ) {
+
+            Text(
+                "G1 Remote",
+                color = Green,
+                fontWeight = FontWeight.Bold,
+                fontSize = 22.sp
+            )
+
+            Text(
+                INSTITUTE,
+                color = Dark,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+
+            Text(
+                "Offline",
+                color = Green,
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp
+            )
+
+            Text(
+                "UI Preview",
+                color = Muted,
+                fontSize = 10.sp
+            )
+        }
+
+        Spacer(Modifier.width(10.dp))
+
+        // NEW: Language selector
+        Row(
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+
+            TextButton(
+                onClick = {
+                    onLanguageChange(AppLanguage.EN)
+                }
+            ) {
+                Text(
+                    "EN",
+                    color = if (
+                        language == AppLanguage.EN
+                    ) Green else Muted,
+                    fontWeight = if (
+                        language == AppLanguage.EN
+                    ) FontWeight.Bold
+                    else FontWeight.Normal
+                )
+            }
+
+            TextButton(
+                onClick = {
+                    onLanguageChange(AppLanguage.DE)
+                }
+            ) {
+                Text(
+                    "DE",
+                    color = if (
+                        language == AppLanguage.DE
+                    ) Green else Muted,
+                    fontWeight = if (
+                        language == AppLanguage.DE
+                    ) FontWeight.Bold
+                    else FontWeight.Normal
+                )
+            }
+        }
+
+        Spacer(Modifier.width(12.dp))
+
+        IconButton(
+            onClick = {
+                if (isHome) {
+                    onOperator()
+                } else {
+                    onHome()
+                }
+            }
+        ) {
+
+            Icon(
+                if (isHome) {
+                    Icons.Default.Lock
+                } else {
+                    Icons.Default.Home
+                },
+                contentDescription = "Navigation",
+                tint = Green
+            )
+        }
+    }
+}
+
+// ======================================================
+// ORIGINAL HOME SCREEN
+// SIXTH CARD ADDED: TALK TO G1
+// ======================================================
+
+@Composable
+private fun HomeScreen(
+    language: AppLanguage,
+    onNavigate: (Screen) -> Unit
+) {
+
+    data class HomeTile(
+        val title: String,
+        val image: Int,
+        val screen: Screen
+    )
+
+    val cards = listOf(
+        HomeTile(
+            tr(
+                language,
+                "Lab Guide",
+                "Laborführung"
+            ),
+            R.drawable.lab_guide,
+            Screen.LAB_GUIDE
+        ),
+
+        HomeTile(
+            tr(
+                language,
+                "Demonstrations",
+                "Demonstrationen"
+            ),
+            R.drawable.demonstration,
+            Screen.DEMONSTRATIONS
+        ),
+
+        HomeTile(
+            tr(
+                language,
+                "Lab Map",
+                "Laborplan"
+            ),
+            R.drawable.lab_map,
+            Screen.LAB_MAP
+        ),
+
+        HomeTile(
+            tr(
+                language,
+                "Lab Info",
+                "Laborinfo"
+            ),
+            R.drawable.lab_info,
+            Screen.LAB_INFO
+        ),
+
+        HomeTile(
+            tr(
+                language,
+                "Safety Presentation",
+                "Sicherheit"
+            ),
+            R.drawable.robot2,
+            Screen.SAFETY_PRESENTATION
+        )
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+
+        // ORIGINAL G1 BANNER
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = Mint
+            ),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(130.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+
+                Image(
+                    painter = painterResource(R.drawable.robot),
+                    contentDescription = "G1",
+                    modifier = Modifier
+                        .width(185.dp)
+                        .fillMaxHeight(),
+                    contentScale = ContentScale.Crop
+                )
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(14.dp)
+                ) {
+
+                    Text(
+                        "Unitree G1",
+                        fontSize = 23.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Dark
+                    )
+
+                    Text(
+                        tr(
+                            language,
+                            "Humanoid Robot",
+                            "Humanoider Roboter"
+                        ),
+                        fontSize = 13.sp,
+                        color = Muted
+                    )
+
+                    Spacer(Modifier.height(6.dp))
+
+                    Text(
+                        tr(
+                            language,
+                            "Robot status: Not connected",
+                            "Roboterstatus: Nicht verbunden"
+                        ),
+                        color = Muted,
+                        fontSize = 11.sp
+                    )
+                }
+
+                Column(
+                    modifier = Modifier
+                        .width(226.dp)
+                        .padding(end = 16.dp, top = 6.dp, bottom = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Text(
+                        tr(language, "Connecting Humans and Robots", "Menschen und Roboter verbinden"),
+                        color = Green,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        lineHeight = 17.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        maxLines = 2
+                    )
+
+                    Text(
+                        tr(language, "Ask G1 about the laboratory", "Frag G1 über das Labor"),
+                        color = Muted,
+                        fontSize = 10.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        maxLines = 1
+                    )
+
+                    Button(
+                        onClick = { onNavigate(Screen.VOICE) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(38.dp),
+                        shape = RoundedCornerShape(50),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Mic,
+                            contentDescription = null,
+                            modifier = Modifier.size(17.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            tr(language, "Talk to G1", "Mit G1 sprechen"),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Icon(
+                            Icons.Default.ArrowForward,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // ORIGINAL CARD ROW
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+
+            cards.forEach { card ->
+
+                Card(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(180.dp)
+                        .clickable {
+                            onNavigate(card.screen)
+                        },
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color.White
+                    ),
+                    elevation = CardDefaults.cardElevation(
+                        defaultElevation = 2.dp
+                    )
+                ) {
+
+                    Column {
+
+                        Image(
+                            painter = painterResource(card.image),
+                            contentDescription = card.title,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(120.dp),
+                            contentScale = ContentScale.Crop
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+
+                            Text(
+                                card.title,
+                                modifier = Modifier.weight(1f),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Dark,
+                                maxLines = 2,
+                                lineHeight = 14.sp
+                            )
+
+                            Icon(
+                                Icons.Default.ArrowForward,
+                                contentDescription = null,
+                                tint = Green,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Notice(
+            "Visitor interface preview. Robot actions " +
+                    "will be controlled by G1 Studio."
+        )
+    }
+}
+
+
+// ======================================================
+// SAFETY PRESENTATION
+// ======================================================
+
+@Composable
+private fun SafetyPresentationScreen(
+    onHome: () -> Unit
+) {
+    var currentSlide by remember { mutableIntStateOf(0) }
+    var playing by remember { mutableStateOf(false) }
+    var finished by remember { mutableStateOf(false) }
+
+    LaunchedEffect(playing, currentSlide) {
+        if (playing) {
+            delay(8000L)
+            if (currentSlide < safetySlides.lastIndex) {
+                currentSlide++
+            } else {
+                playing = false
+                finished = true
+            }
+        }
+    }
+
+    val slide = safetySlides[currentSlide]
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.White)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(42.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.HealthAndSafety,
+                contentDescription = null,
+                tint = Green
+            )
+
+            Spacer(Modifier.width(8.dp))
+
+            Text(
+                "HFU IPSE",
+                color = Green,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(Modifier.width(12.dp))
+
+            Text(
+                "Laboratory Safety Presentation",
+                modifier = Modifier.weight(1f),
+                color = Dark,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Text(
+                "${currentSlide + 1} / ${safetySlides.size}",
+                color = Green,
+                fontWeight = FontWeight.Bold
+            )
+
+            IconButton(
+                onClick = {
+                    playing = false
+                    onHome()
+                }
+            ) {
+                Icon(Icons.Default.Close, "Close")
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Mint)
+        ) {
+            Image(
+                painter = painterResource(slide.image),
+                contentDescription = slide.title,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(12.dp),
+                color = Color.White.copy(alpha = 0.94f),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text(
+                    "VISITOR SAFETY · EXAMPLE",
+                    modifier = Modifier.padding(10.dp),
+                    color = Green,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp
+                )
+            }
+        }
+
+        Text(
+            slide.title,
+            color = Dark,
+            fontSize = 23.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Text(
+            slide.subtitle,
+            color = Muted,
+            fontSize = 12.sp
+        )
+
+        Surface(
+            color = Mint,
+            shape = RoundedCornerShape(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.RecordVoiceOver,
+                    null,
+                    tint = Green
+                )
+
+                Spacer(Modifier.width(10.dp))
+
+                Column {
+                    Text(
+                        when {
+                            finished -> "Preview completed"
+                            playing -> "Narration preview · Playing"
+                            else -> "Narration preview · Paused"
+                        },
+                        color = Green,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Text(
+                        slide.narration,
+                        color = Dark,
+                        fontSize = 12.sp,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        LinearProgressIndicator(
+            progress = {
+                (currentSlide + 1).toFloat() /
+                        safetySlides.size.toFloat()
+            },
+            modifier = Modifier.fillMaxWidth(),
+            color = Green
+        )
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton(
+                onClick = {
+                    playing = false
+                    finished = false
+                    currentSlide =
+                        (currentSlide - 1).coerceAtLeast(0)
+                },
+                enabled = currentSlide > 0
+            ) {
+                Icon(Icons.Default.SkipPrevious, null)
+                Text("Previous")
+            }
+
+            Button(
+                onClick = {
+                    if (finished) {
+                        currentSlide = 0
+                        finished = false
+                        playing = true
+                    } else {
+                        playing = !playing
+                    }
+                }
+            ) {
+                Icon(
+                    if (playing) Icons.Default.Pause
+                    else Icons.Default.PlayArrow,
+                    null
+                )
+                Text(
+                    when {
+                        finished -> "Replay"
+                        playing -> "Pause"
+                        else -> "Play Preview"
+                    }
+                )
+            }
+
+            OutlinedButton(
+                onClick = {
+                    playing = false
+                    finished = false
+                    currentSlide =
+                        (currentSlide + 1)
+                            .coerceAtMost(safetySlides.lastIndex)
+                },
+                enabled = currentSlide < safetySlides.lastIndex
+            ) {
+                Text("Next")
+                Icon(Icons.Default.SkipNext, null)
+            }
+
+            Spacer(Modifier.weight(1f))
+
+            Text(
+                "8 sec / slide · No robot connection",
+                color = Muted,
+                fontSize = 10.sp
+            )
+        }
+    }
+}
+
+// ======================================================
+// SHARED COMPONENTS
+// ======================================================
+
+@Composable
+private fun ScreenTitle(
+    title: String,
+    onBack: () -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        OutlinedButton(onClick = onBack) {
+            Icon(Icons.Default.ArrowBack, null)
+            Spacer(Modifier.width(6.dp))
+            Text("Back")
+        }
+
+        Spacer(Modifier.width(16.dp))
+
+        Text(
+            title,
+            color = Dark,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun Notice(text: String) {
+    Surface(
+        color = Mint,
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.Info,
+                null,
+                tint = Green
+            )
+
+            Spacer(Modifier.width(10.dp))
+
+            Text(
+                text,
+                color = Dark,
+                fontSize = 12.sp
+            )
+        }
+    }
+}
+
+// ======================================================
+// LAB GUIDE AND DEMONSTRATIONS
+// ======================================================
+
+@Composable
+private fun CatalogScreen(
+    title: String,
+    subtitle: String,
+    items: List<VisitorItem>,
+    onBack: () -> Unit,
+    onSelect: (VisitorItem) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        ScreenTitle(title, onBack)
+
+        Text(
+            subtitle,
+            color = Muted,
+            fontSize = 13.sp
+        )
+
+        items.chunked(2).forEach { rowItems ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                rowItems.forEach { item ->
+                    Card(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(155.dp)
+                            .clickable { onSelect(item) },
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Image(
+                                painter = painterResource(item.image),
+                                contentDescription = item.title,
+                                modifier = Modifier
+                                    .width(155.dp)
+                                    .fillMaxHeight(),
+                                contentScale = ContentScale.Crop
+                            )
+
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement =
+                                    Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    item.title,
+                                    color = Dark,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 17.sp
+                                )
+
+                                Text(
+                                    item.subtitle,
+                                    color = Muted,
+                                    fontSize = 12.sp
+                                )
+
+                                Spacer(Modifier.height(5.dp))
+
+                                Text(
+                                    "View Details →",
+                                    color = Green,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (rowItems.size == 1) {
+                    Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailScreen(
+    item: VisitorItem,
+    onBack: () -> Unit,
+    actionLabel: String?,
+    onAction: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        ScreenTitle(item.title, onBack)
+
+        Image(
+            painter = painterResource(item.image),
+            contentDescription = item.title,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(190.dp)
+                .clip(RoundedCornerShape(16.dp)),
+            contentScale = ContentScale.Crop
+        )
+
+        Text(
+            item.subtitle,
+            color = Green,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Text(
+            item.description,
+            color = Dark,
+            fontSize = 14.sp
+        )
+
+        if (actionLabel != null) {
+            Button(onClick = onAction) {
+                Icon(Icons.Default.PlayArrow, null)
+                Spacer(Modifier.width(8.dp))
+                Text(actionLabel)
+            }
+        }
+
+        Notice(
+            "This is a visitor interface preview. " +
+                    "No physical robot commands are sent."
+        )
+    }
+}
+
+// ======================================================
+// LAB MAP
+// ======================================================
+
+@Composable
+private fun LabMapScreen(
+    onBack: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        ScreenTitle("Lab Map", onBack)
+
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = Color.White
+            ),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp)
+            ) {
+                Text(
+                    "HFU IPSE Laboratory",
+                    color = Dark,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Spacer(Modifier.height(10.dp))
+
+                Image(
+                    painter = painterResource(R.drawable.lab_map),
+                    contentDescription = "Lab Map",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(200.dp)
+                        .clip(RoundedCornerShape(12.dp)),
+                    contentScale = ContentScale.Fit
+                )
+            }
+        }
+
+        Notice(
+            "Map preview. Robot localization and " +
+                    "live navigation are not connected."
+        )
+    }
+}
+
+// ======================================================
+// LAB INFORMATION
+// ======================================================
+
+@Composable
+private fun LabInfoScreen(
+    onBack: () -> Unit,
+    onWebsite: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        ScreenTitle("Lab Information", onBack)
+
+        Image(
+            painter = painterResource(R.drawable.lab_info),
+            contentDescription = "HFU Laboratory",
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(170.dp)
+                .clip(RoundedCornerShape(14.dp)),
+            contentScale = ContentScale.Crop
+        )
+
+        Text(
+            INSTITUTE,
+            color = Green,
+            fontSize = 21.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Text(
+            "Explore research, product development, " +
+                    "robotics, smart systems and engineering " +
+                    "activities at HFU IPSE.",
+            color = Dark,
+            fontSize = 14.sp
+        )
+
+        ExpandableSection(
+            title = "Research and Development",
+            description =
+                "Learn about engineering projects, " +
+                        "research activities and laboratory systems."
+        )
+
+        ExpandableSection(
+            title = "Humanoid Robotics",
+            description =
+                "The Unitree G1 is being explored for " +
+                        "visitor assistance, interaction and " +
+                        "demonstration tasks."
+        )
+
+        ExpandableSection(
+            title = "G1 Studio",
+            description =
+                "G1 Studio is the software platform " +
+                        "being developed to support visitor " +
+                        "interaction and supervised robot functions."
+        )
+
+        Button(onClick = onWebsite) {
+            Icon(Icons.Default.Language, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Open Official HFU Website")
+        }
+    }
+}
+
+@Composable
+private fun ExpandableSection(
+    title: String,
+    description: String
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded },
+        colors = CardDefaults.cardColors(
+            containerColor = Color.White
+        ),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    title,
+                    modifier = Modifier.weight(1f),
+                    color = Dark,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Icon(
+                    if (expanded) Icons.Default.ExpandLess
+                    else Icons.Default.ExpandMore,
+                    null,
+                    tint = Green
+                )
+            }
+
+            if (expanded) {
+                Spacer(Modifier.height(8.dp))
+
+                Text(
+                    description,
+                    color = Muted,
+                    fontSize = 13.sp
+                )
+            }
+        }
+    }
+}
+
+// ======================================================
+// HFU WEBSITE
+// ======================================================
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun FullScreenWebsite(
+    onHome: () -> Unit,
+    onBack: () -> Unit
+) {
+    var webView by remember {
+        mutableStateOf<WebView?>(null)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            webView?.stopLoading()
+            webView?.destroy()
+            webView = null
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.White)
+    ) {
+        AndroidView(
+            factory = { context ->
+                WebView(context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    webViewClient = WebViewClient()
+                    webView = this
+                    loadUrl(IPSE_URL)
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        Surface(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(12.dp),
+            color = Color.White,
+            shape = RoundedCornerShape(24.dp),
+            shadowElevation = 6.dp
+        ) {
+            Row {
+                IconButton(
+                    onClick = {
+                        if (webView?.canGoBack() == true) {
+                            webView?.goBack()
+                        } else {
+                            onBack()
+                        }
+                    }
+                ) {
+                    Icon(Icons.Default.ArrowBack, "Back")
+                }
+
+                IconButton(
+                    onClick = { webView?.reload() }
+                ) {
+                    Icon(Icons.Default.Refresh, "Refresh")
+                }
+
+                IconButton(onClick = onHome) {
+                    Icon(Icons.Default.Home, "Home")
+                }
+            }
+        }
+    }
+}
+
+// ======================================================
+// NAVIGATION PREVIEW
+// ======================================================
+
+@Composable
+private fun NavigationPreview(
+    onBack: () -> Unit
+) {
+    var previewStarted by remember { mutableStateOf(false) }
+    var step by remember { mutableIntStateOf(0) }
+
+    val steps = listOf(
+        "Ready",
+        "Preparing",
+        "Guiding",
+        "Arrived",
+        "Completed"
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        ScreenTitle("Coffee Machine Navigation", onBack)
+
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = Color.White
+            ),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Text(
+                    "Visitor Guidance Preview",
+                    color = Dark,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Text(
+                    "Destination: Coffee Machine",
+                    color = Green,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    steps.forEachIndexed { index, title ->
+                        Surface(
+                            modifier = Modifier.weight(1f),
+                            color = if (index <= step)
+                                Mint else Background,
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                horizontalAlignment =
+                                    Alignment.CenterHorizontally
+                            ) {
+                                Icon(
+                                    if (index < step)
+                                        Icons.Default.CheckCircle
+                                    else
+                                        Icons.Default.RadioButtonUnchecked,
+                                    null,
+                                    tint = if (index <= step)
+                                        Green else Muted
+                                )
+
+                                Text(
+                                    title,
+                                    fontSize = 11.sp,
+                                    color = Dark
+                                )
+                            }
+                        }
+                    }
+                }
+
+                LinearProgressIndicator(
+                    progress = { step / 4f },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = Green
+                )
+
+                Text(
+                    "Current Stage: ${steps[step]}",
+                    color = Green,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            previewStarted = true
+                            step = (step + 1).coerceAtMost(4)
+                        },
+                        enabled = step < 4
+                    ) {
+                        Text(
+                            if (!previewStarted)
+                                "Start Preview"
+                            else
+                                "Next Preview Step"
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            previewStarted = false
+                            step = 0
+                        }
+                    ) {
+                        Text("Reset")
+                    }
+                }
+            }
+        }
+
+        Notice(
+            "Navigation simulation only. No walking, " +
+                    "localization or robot commands are active."
+        )
+    }
+}
+
+// ======================================================
+// OPERATOR CONTROL — UI SIMULATION
+// ======================================================
+
+private enum class JoystickMotion(
+    val title: String,
+    val vx: Float,
+    val vy: Float,
+    val yaw: Float
+) {
+    STOP("STOPPED", 0f, 0f, 0f),
+    FORWARD("FORWARD", 0.15f, 0f, 0f),
+    BACKWARD("BACKWARD", -0.15f, 0f, 0f),
+    LEFT("LEFT", 0f, 0.10f, 0f),
+    RIGHT("RIGHT", 0f, -0.10f, 0f),
+    TURN_LEFT("ROTATE LEFT", 0f, 0f, 0.20f),
+    TURN_RIGHT("ROTATE RIGHT", 0f, 0f, -0.20f)
+}
+
+@Composable
+private fun G1RemoteOperatorPreviewScreen(
+    onBack: () -> Unit,
+    onHome: () -> Unit
+) {
+    var pin by remember { mutableStateOf("") }
+    var unlocked by remember { mutableStateOf(false) }
+    var invalidPin by remember { mutableStateOf(false) }
+    var motion by remember {
+        mutableStateOf(JoystickMotion.STOP)
+    }
+
+    var previewFsm by remember { mutableIntStateOf(0) }
+
+    fun stopMotion() {
+        motion = JoystickMotion.STOP
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            motion = JoystickMotion.STOP
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(
+                onClick = {
+                    stopMotion()
+                    onBack()
+                }
+            ) {
+                Icon(Icons.Default.ArrowBack, null)
+                Text("Back")
+            }
+
+            Spacer(Modifier.width(12.dp))
+
+            Text(
+                "G1 Operator Control",
+                modifier = Modifier.weight(1f),
+                color = Dark,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Text(
+                "OFFLINE · UI PREVIEW",
+                color = Green,
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp
+            )
+
+            IconButton(
+                onClick = {
+                    stopMotion()
+                    onHome()
+                }
+            ) {
+                Icon(Icons.Default.Home, "Home", tint = Green)
+            }
+        }
+
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = Color.White
+            )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    if (unlocked) Icons.Default.LockOpen
+                    else Icons.Default.Lock,
+                    null,
+                    tint = Green
+                )
+
+                Text(
+                    if (unlocked)
+                        "Operator Preview Unlocked"
+                    else
+                        "Operator Authentication",
+                    modifier = Modifier.weight(1f),
+                    color = Dark,
+                    fontWeight = FontWeight.Bold
+                )
+
+                if (!unlocked) {
+                    OutlinedTextField(
+                        value = pin,
+                        onValueChange = {
+                            pin = it.filter(Char::isDigit).take(4)
+                            invalidPin = false
+                        },
+                        modifier = Modifier.width(135.dp),
+                        label = { Text("PIN") },
+                        singleLine = true,
+                        isError = invalidPin,
+                        visualTransformation =
+                            PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.NumberPassword
+                        )
+                    )
+
+                    Button(
+                        onClick = {
+                            if (pin == "1234") {
+                                unlocked = true
+                                invalidPin = false
+                            } else {
+                                invalidPin = true
+                                pin = ""
+                            }
+                        },
+                        enabled = pin.length == 4
+                    ) {
+                        Text("Unlock")
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = {
+                            stopMotion()
+                            unlocked = false
+                            previewFsm = 0
+                            pin = ""
+                        }
+                    ) {
+                        Icon(Icons.Default.Lock, null)
+                        Text("Lock")
+                    }
+                }
+            }
+        }
+
+        if (invalidPin) {
+            Text(
+                "Incorrect PIN",
+                color = Color.Red,
+                fontSize = 12.sp
+            )
+        }
+
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = Color.White
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "Robot FSM Modes — Preview",
+                    color = Dark,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 17.sp
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        0 to "Zero Torque",
+                        1 to "Damp",
+                        4 to "Stand Up",
+                        500 to "Locomotion"
+                    ).forEach { (fsm, label) ->
+                        Surface(
+                            modifier = Modifier.weight(1f),
+                            color = if (previewFsm == fsm)
+                                Mint else Background,
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                if (previewFsm == fsm)
+                                    Green else BorderColor
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                horizontalAlignment =
+                                    Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    "FSM $fsm",
+                                    color = Green,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 17.sp
+                                )
+
+                                Text(
+                                    label,
+                                    color = Dark,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Text(
+                    "Preview sequence: FSM 0 → 1 → 4 → 500",
+                    color = Muted,
+                    fontSize = 11.sp
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            stopMotion()
+                            previewFsm = 1
+                        },
+                        enabled = unlocked && previewFsm == 0,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("FSM 1 · Damp")
+                    }
+
+                    Button(
+                        onClick = {
+                            stopMotion()
+                            previewFsm = 4
+                        },
+                        enabled = unlocked && previewFsm == 1,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("FSM 4 · Stand")
+                    }
+
+                    Button(
+                        onClick = {
+                            stopMotion()
+                            previewFsm = 500
+                        },
+                        enabled = unlocked && previewFsm == 4,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("FSM 500 · Locomotion")
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            stopMotion()
+                            previewFsm = 0
+                        },
+                        enabled = unlocked
+                    ) {
+                        Text("Reset")
+                    }
+                }
+            }
+        }
+
+        val joystickEnabled =
+            unlocked && previewFsm == 500
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Card(
+                modifier = Modifier.weight(1.3f),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color.White
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "Walking Joystick",
+                        color = Dark,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    HoldJoystickButton(
+                        "Forward",
+                        Icons.Default.ArrowUpward,
+                        joystickEnabled,
+                        motion == JoystickMotion.FORWARD,
+                        { motion = JoystickMotion.FORWARD },
+                        { stopMotion() }
+                    )
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        HoldJoystickButton(
+                            "Left",
+                            Icons.Default.ArrowBack,
+                            joystickEnabled,
+                            motion == JoystickMotion.LEFT,
+                            { motion = JoystickMotion.LEFT },
+                            { stopMotion() }
+                        )
+
+                        Button(
+                            onClick = { stopMotion() },
+                            modifier = Modifier
+                                .width(100.dp)
+                                .height(64.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFB3261E)
+                            )
+                        ) {
+                            Column(
+                                horizontalAlignment =
+                                    Alignment.CenterHorizontally
+                            ) {
+                                Icon(Icons.Default.Stop, null)
+                                Text("STOP", fontSize = 11.sp)
+                            }
+                        }
+
+                        HoldJoystickButton(
+                            "Right",
+                            Icons.Default.ArrowForward,
+                            joystickEnabled,
+                            motion == JoystickMotion.RIGHT,
+                            { motion = JoystickMotion.RIGHT },
+                            { stopMotion() }
+                        )
+                    }
+
+                    HoldJoystickButton(
+                        "Backward",
+                        Icons.Default.ArrowDownward,
+                        joystickEnabled,
+                        motion == JoystickMotion.BACKWARD,
+                        { motion = JoystickMotion.BACKWARD },
+                        { stopMotion() }
+                    )
+                }
+            }
+
+            Card(
+                modifier = Modifier.weight(0.8f),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color.White
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Text(
+                        "Rotation",
+                        color = Dark,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    HoldJoystickButton(
+                        "Rotate Left",
+                        Icons.Default.RotateLeft,
+                        joystickEnabled,
+                        motion == JoystickMotion.TURN_LEFT,
+                        { motion = JoystickMotion.TURN_LEFT },
+                        { stopMotion() },
+                        wide = true
+                    )
+
+                    HoldJoystickButton(
+                        "Rotate Right",
+                        Icons.Default.RotateRight,
+                        joystickEnabled,
+                        motion == JoystickMotion.TURN_RIGHT,
+                        { motion = JoystickMotion.TURN_RIGHT },
+                        { stopMotion() },
+                        wide = true
+                    )
+
+                    Text(
+                        "Press and hold",
+                        color = Muted,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+
+            Card(
+                modifier = Modifier.weight(0.85f),
+                colors = CardDefaults.cardColors(
+                    containerColor = Mint
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        "Motion Preview",
+                        color = Dark,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Text(
+                        motion.title,
+                        color = Green,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp
+                    )
+
+                    Text("vx: %.2f m/s".format(motion.vx))
+                    Text("vy: %.2f m/s".format(motion.vy))
+                    Text("yaw: %.2f rad/s".format(motion.yaw))
+
+                    HorizontalDivider()
+
+                    Text(
+                        "Actual robot FSM: Unknown",
+                        color = Muted,
+                        fontSize = 11.sp
+                    )
+
+                    Text(
+                        "Robot: Not connected",
+                        color = Muted,
+                        fontSize = 11.sp
+                    )
+
+                    Text(
+                        "Physical motion: DISABLED",
+                        color = Color(0xFF9D4B00),
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        }
+
+        Notice(
+            "Demo PIN 1234 unlocks the UI only. " +
+                    "No commands are sent to G1. " +
+                    "On-screen STOP is not an emergency stop."
+        )
+    }
+}
+
+// ======================================================
+// PRESS-AND-HOLD JOYSTICK BUTTON
+// ======================================================
+
+@Composable
+private fun HoldJoystickButton(
+    title: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    enabled: Boolean,
+    active: Boolean,
+    onPress: () -> Unit,
+    onRelease: () -> Unit,
+    wide: Boolean = false
+) {
+    val shape = RoundedCornerShape(12.dp)
+
+    val backgroundColor = when {
+        !enabled -> Color(0xFFE6E9E7)
+        active -> Green
+        else -> Mint
+    }
+
+    val foregroundColor = when {
+        !enabled -> Color.Gray
+        active -> Color.White
+        else -> Green
+    }
+
+    val latestPress by rememberUpdatedState(onPress)
+    val latestRelease by rememberUpdatedState(onRelease)
+
+    Column(
+        modifier = Modifier
+            .width(if (wide) 155.dp else 96.dp)
+            .height(64.dp)
+            .background(backgroundColor, shape)
+            .border(1.dp, BorderColor, shape)
+            .pointerInput(enabled) {
+                if (enabled) {
+                    detectTapGestures(
+                        onPress = {
+                            latestPress()
+                            try {
+                                tryAwaitRelease()
+                            } finally {
+                                latestRelease()
+                            }
+                        }
+                    )
+                }
+            },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            icon,
+            contentDescription = title,
+            tint = foregroundColor
+        )
+
+        Text(
+            title,
+            color = foregroundColor,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+// ======================================================
+// NEW: TALK TO G1
+// ======================================================
+
+@Composable
+private fun TalkToG1Screen(
+    language: AppLanguage,
+    onBack: () -> Unit
+) {
+    var message by remember {
+        mutableStateOf("")
+    }
+
+    var microphonePreview by remember {
+        mutableStateOf(false)
+    }
+
+    var messages by remember {
+        mutableStateOf(
+            listOf(
+                "G1" to "Hello! I'm G1. How can I help you?"
+            )
+        )
+    }
+
+    fun send(text: String) {
+        if (text.isBlank()) return
+
+        messages = messages + ("Visitor" to text.trim())
+
+        messages = messages + (
+                "G1" to tr(
+                    language,
+                    "This is a preview. My AI voice service " +
+                            "will be connected through G1 Studio.",
+                    "Dies ist eine Vorschau. Mein KI-Sprachdienst " +
+                            "wird später mit G1 Studio verbunden."
+                )
+                )
+
+        message = ""
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        ScreenTitle(
+            tr(
+                language,
+                "Talk to G1",
+                "Mit G1 sprechen"
+            ),
+            onBack
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Card(
+                modifier = Modifier.weight(0.9f),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color.White
+                ),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Mic,
+                        contentDescription = null,
+                        tint = Green,
+                        modifier = Modifier.size(55.dp)
+                    )
+
+                    Text(
+                        tr(
+                            language,
+                            "G1 Voice Assistant",
+                            "G1 Sprachassistent"
+                        ),
+                        color = Dark,
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Text(
+                        if (microphonePreview) {
+                            tr(
+                                language,
+                                "Listening Preview",
+                                "Hörvorschau"
+                            )
+                        } else {
+                            tr(
+                                language,
+                                "Ready",
+                                "Bereit"
+                            )
+                        },
+                        color = Green
+                    )
+
+                    Button(
+                        onClick = {
+                            microphonePreview = !microphonePreview
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            if (microphonePreview)
+                                Icons.Default.Stop
+                            else
+                                Icons.Default.Mic,
+                            null
+                        )
+
+                        Spacer(Modifier.width(8.dp))
+
+                        Text(
+                            if (microphonePreview) {
+                                tr(
+                                    language,
+                                    "Stop Preview",
+                                    "Vorschau stoppen"
+                                )
+                            } else {
+                                tr(
+                                    language,
+                                    "Microphone Preview",
+                                    "Mikrofonvorschau"
+                                )
+                            }
+                        )
+                    }
+
+                    Text(
+                        tr(
+                            language,
+                            "Microphone and speech recognition " +
+                                    "are not connected yet.",
+                            "Mikrofon und Spracherkennung " +
+                                    "sind noch nicht verbunden."
+                        ),
+                        color = Muted,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+
+            Card(
+                modifier = Modifier.weight(1.4f),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color.White
+                ),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        tr(
+                            language,
+                            "Conversation",
+                            "Unterhaltung"
+                        ),
+                        color = Dark,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        messages.forEach { (speaker, content) ->
+                            Surface(
+                                color = if (speaker == "G1")
+                                    Mint else Background,
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(10.dp)
+                                ) {
+                                    Text(
+                                        speaker,
+                                        color = Green,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp
+                                    )
+
+                                    Text(
+                                        content,
+                                        color = Dark,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = message,
+                            onValueChange = {
+                                message = it
+                            },
+                            label = {
+                                Text(
+                                    tr(
+                                        language,
+                                        "Type a message",
+                                        "Nachricht eingeben"
+                                    )
+                                )
+                            },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+
+                        Spacer(Modifier.width(8.dp))
+
+                        Button(
+                            onClick = {
+                                send(message)
+                            },
+                            enabled = message.isNotBlank()
+                        ) {
+                            Icon(
+                                Icons.Default.Send,
+                                contentDescription = "Send"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Notice(
+            tr(
+                language,
+                "Voice UI preview only. No audio recording, " +
+                        "AI service or robot command is connected.",
+                "Nur eine Vorschau. Audioaufnahme, " +
+                        "KI-Dienst und Roboterbefehle " +
+                        "sind nicht verbunden."
+            )
+        )
+    }
+}
+
+
+
