@@ -3,6 +3,16 @@ package com.example.g1remote
 import android.annotation.SuppressLint
 import android.content.pm.ActivityInfo
 import android.os.Bundle
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import java.util.Locale
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
@@ -18,6 +28,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,6 +58,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.g1remote.ui.theme.G1RemoteTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
+import java.net.URL
+import org.json.JSONObject
+import org.json.JSONArray
 
 private val Green = Color(0xFF087B39)
 private val Mint = Color(0xFFE7F5EC)
@@ -260,9 +279,23 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun G1RemoteApp() {
 
+    var backendStatus by remember {
+        mutableStateOf<G1Backend.ConnectionStatus?>(null)
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            backendStatus = G1Backend.checkConnection()
+            delay(5000L)
+        }
+    }
+
     var screen by remember {
         mutableStateOf(Screen.HOME)
     }
+
+    // Shared across visits to the voice screen; lost when the app process ends.
+    var visitorSessionId by remember { mutableStateOf<String?>(null) }
 
     // NEW: English / German
     var language by remember {
@@ -311,6 +344,7 @@ private fun G1RemoteApp() {
             RemoteHeader(
                 isHome = screen == Screen.HOME,
                 language = language,
+                backendStatus = backendStatus,
                 onLanguageChange = {
                     language = it
                 },
@@ -337,7 +371,8 @@ private fun G1RemoteApp() {
 
                 Screen.SAFETY_PRESENTATION ->
                     SafetyPresentationScreen(
-                        onHome = home
+                        onHome = home,
+                        autoNarrateFirstSlide = true
                     )
 
                 Screen.LAB_GUIDE -> CatalogScreen(
@@ -409,7 +444,10 @@ private fun G1RemoteApp() {
                 // NEW: Talk to G1
                 Screen.VOICE -> TalkToG1Screen(
                     language = language,
-                    onBack = back
+                    onBack = back,
+                    onStartSafety = { screen = Screen.SAFETY_PRESENTATION },
+                    sessionId = visitorSessionId,
+                    onSessionIdChange = { visitorSessionId = it }
                 )
 
                 // Existing operator control remains.
@@ -430,6 +468,7 @@ private fun G1RemoteApp() {
 private fun RemoteHeader(
     isHome: Boolean,
     language: AppLanguage,
+    backendStatus: G1Backend.ConnectionStatus?,
     onLanguageChange: (AppLanguage) -> Unit,
     onHome: () -> Unit,
     onOperator: () -> Unit
@@ -480,16 +519,27 @@ private fun RemoteHeader(
         ) {
 
             Text(
-                "Offline",
-                color = Green,
+                text = when {
+                    backendStatus == null -> "Checking..."
+                    backendStatus.connected -> "Backend Connected"
+                    else -> "Backend Offline"
+                },
+                color = if (backendStatus?.connected == true) Green
+                else Color(0xFFB3261E),
                 fontWeight = FontWeight.Bold,
                 fontSize = 12.sp
             )
 
             Text(
-                "UI Preview",
+                text = when {
+                    backendStatus == null -> "Connecting to Ubuntu"
+                    backendStatus.connected -> "G1 Studio API · Online"
+                    else -> backendStatus.error.ifBlank { "Connection unavailable" }
+                },
                 color = Muted,
-                fontSize = 10.sp
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
 
@@ -752,6 +802,9 @@ private fun HomeScreen(
             }
         }
 
+        // Visitor-facing camera preview. No camera is connected yet.
+        HomeCameraPreview(language = language)
+
         // ORIGINAL CARD ROW
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -825,240 +878,401 @@ private fun HomeScreen(
 
 
 // ======================================================
-// SAFETY PRESENTATION
+// HOME CAMERA PREVIEW — UI ONLY, NO CAMERA CONNECTION
 // ======================================================
 
 @Composable
-private fun SafetyPresentationScreen(
-    onHome: () -> Unit
-) {
-    var currentSlide by remember { mutableIntStateOf(0) }
-    var playing by remember { mutableStateOf(false) }
-    var finished by remember { mutableStateOf(false) }
-
-    LaunchedEffect(playing, currentSlide) {
-        if (playing) {
-            delay(8000L)
-            if (currentSlide < safetySlides.lastIndex) {
-                currentSlide++
-            } else {
-                playing = false
-                finished = true
-            }
-        }
-    }
-
-    val slide = safetySlides[currentSlide]
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.White)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(7.dp)
+private fun HomeCameraPreview(language: AppLanguage) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(42.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .height(112.dp)
+                .padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Icon(
-                Icons.Default.HealthAndSafety,
-                contentDescription = null,
-                tint = Green
-            )
-
-            Spacer(Modifier.width(8.dp))
-
-            Text(
-                "HFU IPSE",
-                color = Green,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold
-            )
-
-            Spacer(Modifier.width(12.dp))
-
-            Text(
-                "Laboratory Safety Presentation",
-                modifier = Modifier.weight(1f),
-                color = Dark,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.Bold
-            )
-
-            Text(
-                "${currentSlide + 1} / ${safetySlides.size}",
-                color = Green,
-                fontWeight = FontWeight.Bold
-            )
-
-            IconButton(
-                onClick = {
-                    playing = false
-                    onHome()
-                }
-            ) {
-                Icon(Icons.Default.Close, "Close")
-            }
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .clip(RoundedCornerShape(14.dp))
-                .background(Mint)
-        ) {
-            Image(
-                painter = painterResource(slide.image),
-                contentDescription = slide.title,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-
-            Surface(
+            Box(
                 modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(12.dp),
-                color = Color.White.copy(alpha = 0.94f),
-                shape = RoundedCornerShape(10.dp)
+                    .width(180.dp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF1B2A25)),
+                contentAlignment = Alignment.Center
             ) {
-                Text(
-                    "VISITOR SAFETY · EXAMPLE",
-                    modifier = Modifier.padding(10.dp),
-                    color = Green,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp
-                )
-            }
-        }
-
-        Text(
-            slide.title,
-            color = Dark,
-            fontSize = 23.sp,
-            fontWeight = FontWeight.Bold
-        )
-
-        Text(
-            slide.subtitle,
-            color = Muted,
-            fontSize = 12.sp
-        )
-
-        Surface(
-            color = Mint,
-            shape = RoundedCornerShape(10.dp)
-        ) {
-            Row(
-                modifier = Modifier.padding(10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    Icons.Default.RecordVoiceOver,
-                    null,
-                    tint = Green
-                )
-
-                Spacer(Modifier.width(10.dp))
-
-                Column {
-                    Text(
-                        when {
-                            finished -> "Preview completed"
-                            playing -> "Narration preview · Playing"
-                            else -> "Narration preview · Paused"
-                        },
-                        color = Green,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.VideocamOff,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.75f),
+                        modifier = Modifier.size(28.dp)
                     )
-
                     Text(
-                        slide.narration,
-                        color = Dark,
-                        fontSize = 12.sp,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis
+                        text = tr(language, "No video signal", "Kein Videosignal"),
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 11.sp
                     )
                 }
             }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Videocam, null, tint = Green, modifier = Modifier.size(19.dp))
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        text = tr(language, "G1 Live Camera", "G1 Live-Kamera"),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Dark
+                    )
+                }
+                Text(
+                    text = tr(language, "Camera not connected", "Kamera nicht verbunden"),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Muted
+                )
+                Text(
+                    text = tr(
+                        language,
+                        "Live view will appear here when an external camera is installed.",
+                        "Die Live-Ansicht erscheint hier, sobald eine externe Kamera installiert ist."
+                    ),
+                    fontSize = 11.sp,
+                    color = Muted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+// ======================================================
+// SAFETY PRESENTATION
+// ======================================================
+
+private const val SAFETY_API = "http://10.150.68.160:8000/api/visitor-safety"
+
+private data class ApiSafetySlide(
+    val id: String,
+    val title: String,
+    val subtitle: String,
+    val points: List<String>
+)
+
+private data class ApiSafetyBriefing(
+    val slides: List<ApiSafetySlide>,
+    val approved: Boolean,
+    val version: String
+)
+
+private fun safetyHttp(path: String, method: String = "GET", payload: JSONObject? = null): JSONObject {
+    val connection = (URL("$SAFETY_API$path").openConnection() as HttpURLConnection)
+    try {
+        connection.requestMethod = method
+        connection.connectTimeout = 10000
+        connection.readTimeout = 30000
+        if (payload != null) {
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+        }
+        val code = connection.responseCode
+        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        if (code !in 200..299) throw IllegalStateException("HTTP $code: ${body.take(250)}")
+        return JSONObject(body)
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private fun fetchSafetyBriefing(): ApiSafetyBriefing {
+    val result = safetyHttp("/briefing")
+    val array = result.getJSONArray("slides")
+    val slides = (0 until array.length()).map { index ->
+        val slide = array.getJSONObject(index)
+        val points = slide.getJSONArray("points")
+        ApiSafetySlide(
+            id = slide.getString("id"),
+            title = slide.getString("title"),
+            subtitle = slide.optString("subtitle"),
+            points = (0 until points.length()).map { points.getString(it) }
+        )
+    }
+    return ApiSafetyBriefing(
+        slides = slides,
+        approved = result.optString("approval_status") == "approved",
+        version = result.getString("version")
+    )
+}
+
+// Timed progression is an estimate, NOT Unitree playback-completion feedback.
+// Increase this buffer if G1 is still talking when the next slide appears.
+private const val SAFETY_SPEECH_BUFFER_MS = 6000L
+private const val SAFETY_SPEECH_WORDS_PER_MINUTE = 105L
+
+private val originalSafetyImages = mapOf(
+    "welcome" to R.drawable.hfu_safety_01,
+    "overview" to R.drawable.hfu_safety_02,
+    "fire_response" to R.drawable.hfu_safety_03,
+    "evacuation" to R.drawable.hfu_safety_04,
+    "small_fires" to R.drawable.hfu_safety_05,
+    "extinguishers" to R.drawable.hfu_safety_06,
+    "assembly" to R.drawable.hfu_safety_07,
+    "accident_response" to R.drawable.hfu_safety_08,
+    "first_aid" to R.drawable.hfu_safety_09,
+    "defibrillator" to R.drawable.hfu_safety_10,
+    "lab_access" to R.drawable.hfu_safety_11,
+    "lab_housekeeping" to R.drawable.hfu_safety_12,
+    "electrical" to R.drawable.hfu_safety_13,
+    "waste" to R.drawable.hfu_safety_14,
+    "summary" to R.drawable.hfu_safety_15,
+)
+private fun estimatedSafetyNarrationMs(text: String): Long {
+    val words = text.trim().split(Regex("\\s+")).count { it.isNotBlank() }.toLong()
+    return ((words * 60_000L) / SAFETY_SPEECH_WORDS_PER_MINUTE +
+            SAFETY_SPEECH_BUFFER_MS).coerceIn(10_000L, 120_000L)
+}
+
+@Composable
+private fun SafetyPresentationScreen(
+    onHome: () -> Unit,
+    autoNarrateFirstSlide: Boolean = false
+) {
+    val scope = rememberCoroutineScope()
+    var briefing by remember { mutableStateOf<ApiSafetyBriefing?>(null) }
+    var sessionId by remember { mutableStateOf<String?>(null) }
+    var currentSlide by remember { mutableIntStateOf(0) }
+    var visitedSlideIds by remember { mutableStateOf(setOf<String>()) }
+    var acknowledged by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var narrationStatus by remember { mutableStateOf("Preparing safety presentation…") }
+    var understood by remember { mutableStateOf(false) }
+    var autoPlaying by remember { mutableStateOf(true) }
+    var replayNonce by remember { mutableIntStateOf(0) }
+    var narrationRunning by remember { mutableStateOf(false) }
+    var remainingMs by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(Unit) {
+        busy = true
+        try {
+            val data = withContext(Dispatchers.IO) { fetchSafetyBriefing() }
+            val session = withContext(Dispatchers.IO) { safetyHttp("/sessions", "POST") }
+            briefing = data
+            sessionId = session.getString("session_id")
+            if (data.slides.isNotEmpty()) visitedSlideIds = setOf(data.slides.first().id)
+            error = null
+        } catch (exception: Exception) {
+            autoPlaying = false
+            error = exception.message ?: "Cannot load safety briefing"
+        } finally {
+            busy = false
+        }
+    }
+
+    val slides = briefing?.slides.orEmpty()
+    val slide = slides.getOrNull(currentSlide)
+
+    // A new slide starts narration automatically. Pausing only freezes the
+    // countdown; it cannot stop audio already playing on the physical robot.
+    LaunchedEffect(sessionId, currentSlide, replayNonce) {
+        val id = sessionId ?: return@LaunchedEffect
+        val item = slides.getOrNull(currentSlide) ?: return@LaunchedEffect
+        if (!autoPlaying) return@LaunchedEffect
+        narrationRunning = true
+        remainingMs = 0L
+        narrationStatus = "Sending slide ${currentSlide + 1} narration to G1…"
+        try {
+            val response = withContext(Dispatchers.IO) {
+                safetyHttp("/sessions/$id/slides/${item.id}/speak", "POST")
+            }
+            if (!response.optBoolean("speech_accepted")) {
+                throw IllegalStateException("G1 did not accept the narration")
+            }
+            val narration = response.optString("narration", "")
+            if (narration.isBlank()) {
+                throw IllegalStateException("Narration text missing; cannot estimate duration")
+            }
+            remainingMs = estimatedSafetyNarrationMs(narration)
+            while (remainingMs > 0L) {
+                if (autoPlaying) {
+                    narrationStatus = "G1 narration — estimated ${((remainingMs + 999L) / 1000L)}s remaining"
+                    val tick = minOf(250L, remainingMs)
+                    delay(tick)
+                    remainingMs -= tick
+                } else {
+                    narrationStatus = "Paused (G1 audio may still be playing)"
+                    delay(250L)
+                }
+            }
+            narrationRunning = false
+            if (autoPlaying && currentSlide < slides.lastIndex) {
+                currentSlide += 1
+                visitedSlideIds = visitedSlideIds + slides[currentSlide].id
+            } else {
+                narrationStatus = if (currentSlide == slides.lastIndex)
+                    "Presentation finished. Please review and acknowledge below."
+                else "Paused. Tap Resume to continue."
+                autoPlaying = false
+            }
+        } catch (exception: Exception) {
+            narrationRunning = false
+            autoPlaying = false
+            error = exception.message ?: "Narration unavailable"
+            narrationStatus = "Narration stopped. Tap Replay to retry."
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize().background(Color.White)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.HealthAndSafety, null, tint = Green)
+            Spacer(Modifier.width(10.dp))
+            Text("HFU IPSE · Visitor Safety", modifier = Modifier.weight(1f),
+                fontSize = 19.sp, fontWeight = FontWeight.Bold, color = Dark)
+            Text(if (slides.isEmpty()) "Loading" else "${currentSlide + 1} / ${slides.size}",
+                color = Green, fontWeight = FontWeight.Bold)
+            IconButton(onClick = onHome) { Icon(Icons.Default.Close, "Close") }
         }
 
-        LinearProgressIndicator(
-            progress = {
-                (currentSlide + 1).toFloat() /
-                        safetySlides.size.toFloat()
-            },
-            modifier = Modifier.fillMaxWidth(),
-            color = Green
-        )
-
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedButton(
-                onClick = {
-                    playing = false
-                    finished = false
-                    currentSlide =
-                        (currentSlide - 1).coerceAtLeast(0)
-                },
-                enabled = currentSlide > 0
-            ) {
-                Icon(Icons.Default.SkipPrevious, null)
-                Text("Previous")
+        if (briefing != null && briefing?.approved != true) {
+            Surface(color = Color(0xFFFFF2DD), shape = RoundedCornerShape(10.dp)) {
+                Text("DRAFT — Pending laboratory supervisor approval. Not valid as formal safety instruction.",
+                    modifier = Modifier.padding(9.dp), fontSize = 12.sp, color = Color(0xFF825200))
             }
-
-            Button(
-                onClick = {
-                    if (finished) {
-                        currentSlide = 0
-                        finished = false
-                        playing = true
+        }
+        if (busy && slide == null) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            Text("Loading visitor safety briefing from G1 Studio…")
+        }
+        if (error != null) {
+            Text("Connection error: $error", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+        }
+        if (slide != null) {
+            Text(slide.title, fontSize = 23.sp, fontWeight = FontWeight.Bold, color = Dark)
+            Text(slide.subtitle, fontSize = 13.sp, color = Muted)
+            Card(modifier = Modifier.fillMaxWidth().weight(1f),
+                colors = CardDefaults.cardColors(containerColor = Mint),
+                shape = RoundedCornerShape(14.dp)) {
+                val originalImage = originalSafetyImages[slide.id]
+                if (originalImage != null) {
+                    Image(
+                        painter = painterResource(originalImage),
+                        contentDescription = "Original HFU safety slide: ${slide.title}",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().padding(4.dp)
+                    )
+                } else {
+                    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                        .padding(16.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
+                        slide.points.forEach { point ->
+                            Row(verticalAlignment = Alignment.Top) {
+                                Icon(Icons.Default.CheckCircle, null, tint = Green,
+                                    modifier = Modifier.size(19.dp))
+                                Spacer(Modifier.width(10.dp))
+                                Text(point, fontSize = 15.sp, color = Dark)
+                            }
+                        }
+                    }
+                }
+            }
+            Text(narrationStatus, color = Muted, fontSize = 12.sp)
+            LinearProgressIndicator(
+                progress = { (currentSlide + 1).toFloat() / slides.size },
+                modifier = Modifier.fillMaxWidth(), color = Green)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = {
+                    autoPlaying = false
+                    currentSlide = (currentSlide - 1).coerceAtLeast(0)
+                    visitedSlideIds = visitedSlideIds + slides[currentSlide].id
+                    narrationStatus = "Previous slide. Tap Replay to narrate."
+                    error = null
+                }, enabled = currentSlide > 0 && !narrationRunning && !busy) {
+                    Icon(Icons.Default.ChevronLeft, null)
+                    Text("Previous")
+                }
+                Button(onClick = {
+                    if (autoPlaying) {
+                        autoPlaying = false
                     } else {
-                        playing = !playing
+                        autoPlaying = true
+                        if (!narrationRunning) replayNonce += 1
                     }
+                }, enabled = !busy && sessionId != null &&
+                        (narrationRunning || currentSlide < slides.lastIndex || remainingMs == 0L)) {
+                    Icon(if (autoPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null)
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (autoPlaying) "Pause" else "Resume")
                 }
-            ) {
-                Icon(
-                    if (playing) Icons.Default.Pause
-                    else Icons.Default.PlayArrow,
-                    null
-                )
-                Text(
-                    when {
-                        finished -> "Replay"
-                        playing -> "Pause"
-                        else -> "Play Preview"
+                OutlinedButton(onClick = {
+                    error = null
+                    autoPlaying = true
+                    replayNonce += 1
+                }, enabled = !busy && !narrationRunning && sessionId != null) {
+                    Icon(Icons.Default.RecordVoiceOver, null)
+                    Text("Replay")
+                }
+                OutlinedButton(onClick = {
+                    autoPlaying = false
+                    currentSlide = (currentSlide + 1).coerceAtMost(slides.lastIndex)
+                    visitedSlideIds = visitedSlideIds + slides[currentSlide].id
+                    narrationStatus = "Next slide. Tap Resume to narrate."
+                    error = null
+                }, enabled = currentSlide < slides.lastIndex && !narrationRunning && !busy) {
+                    Text("Next")
+                    Icon(Icons.Default.ChevronRight, null)
+                }
+            }
+            if (currentSlide == slides.lastIndex && !acknowledged) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = understood, onCheckedChange = { understood = it })
+                    Text("I have reviewed the safety information and understand the instructions.",
+                        fontSize = 12.sp, color = Dark)
+                }
+                Button(onClick = {
+                    val id = sessionId ?: return@Button
+                    busy = true
+                    error = null
+                    scope.launch {
+                        try {
+                            val payload = JSONObject()
+                                .put("understood", true)
+                                .put("presented_slide_ids", JSONArray(slides.map { it.id }))
+                            withContext(Dispatchers.IO) {
+                                safetyHttp("/sessions/$id/acknowledge", "POST", payload)
+                            }
+                            acknowledged = true
+                        } catch (exception: Exception) {
+                            error = exception.message ?: "Acknowledgement failed"
+                        } finally { busy = false }
                     }
-                )
+                }, enabled = understood && !busy && !narrationRunning &&
+                        visitedSlideIds.containsAll(slides.map { it.id })) {
+                    Text("I Understand · Record Acknowledgement")
+                }
             }
-
-            OutlinedButton(
-                onClick = {
-                    playing = false
-                    finished = false
-                    currentSlide =
-                        (currentSlide + 1)
-                            .coerceAtMost(safetySlides.lastIndex)
-                },
-                enabled = currentSlide < safetySlides.lastIndex
-            ) {
-                Text("Next")
-                Icon(Icons.Default.SkipNext, null)
+            if (acknowledged) {
+                Text("Acknowledgement recorded in G1 Studio. Tour and physical motion remain unauthorized until separately approved.",
+                    color = Green, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
-
-            Spacer(Modifier.weight(1f))
-
-            Text(
-                "8 sec / slide · No robot connection",
-                color = Muted,
-                fontSize = 10.sp
-            )
         }
     }
 }
@@ -1275,51 +1489,77 @@ private fun DetailScreen(
 private fun LabMapScreen(
     onBack: () -> Unit
 ) {
+    var zoom by remember { mutableFloatStateOf(1f) }
+    var panX by remember { mutableFloatStateOf(0f) }
+    var panY by remember { mutableFloatStateOf(0f) }
+
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        ScreenTitle("Lab Map", onBack)
+        ScreenTitle("Building H – First Floor", onBack)
+        Text(
+            "HFU IPSE laboratory floor plan · Pinch to zoom and drag to explore",
+            color = Muted,
+            fontSize = 13.sp
+        )
 
         Card(
-            colors = CardDefaults.cardColors(
-                containerColor = Color.White
-            ),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
             shape = RoundedCornerShape(16.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp)
+            BoxWithConstraints(
+                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)),
+                contentAlignment = Alignment.Center
             ) {
-                Text(
-                    "HFU IPSE Laboratory",
-                    color = Dark,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-
-                Spacer(Modifier.height(10.dp))
+                val widthPx = constraints.maxWidth.toFloat()
+                val heightPx = constraints.maxHeight.toFloat()
 
                 Image(
-                    painter = painterResource(R.drawable.lab_map),
-                    contentDescription = "Lab Map",
+                    painter = painterResource(R.drawable.hfu_building_h_floor1),
+                    contentDescription = "Original HFU Building H first-floor evacuation and rescue plan",
+                    contentScale = ContentScale.Fit,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(200.dp)
-                        .clip(RoundedCornerShape(12.dp)),
-                    contentScale = ContentScale.Fit
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectTransformGestures { _, pan, gestureZoom, _ ->
+                                val newZoom = (zoom * gestureZoom).coerceIn(1f, 5f)
+                                val maxX = (widthPx * (newZoom - 1f) / 2f).coerceAtLeast(0f)
+                                val maxY = (heightPx * (newZoom - 1f) / 2f).coerceAtLeast(0f)
+                                panX = (panX + pan.x).coerceIn(-maxX, maxX)
+                                panY = (panY + pan.y).coerceIn(-maxY, maxY)
+                                zoom = newZoom
+                                if (zoom == 1f) {
+                                    panX = 0f
+                                    panY = 0f
+                                }
+                            }
+                        }
+                        .graphicsLayer {
+                            scaleX = zoom
+                            scaleY = zoom
+                            translationX = panX
+                            translationY = panY
+                        }
                 )
             }
         }
 
-        Notice(
-            "Map preview. Robot localization and " +
-                    "live navigation are not connected."
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton(onClick = {
+                zoom = 1f
+                panX = 0f
+                panY = 0f
+            }) { Text("Reset zoom") }
+            Text("${(zoom * 100).toInt()}%", color = Muted, fontSize = 13.sp)
+            Spacer(Modifier.weight(1f))
+            Text("Floor plan · Not live navigation", color = Muted, fontSize = 12.sp)
+        }
     }
 }
 
@@ -2215,268 +2455,341 @@ private fun HoldJoystickButton(
 @Composable
 private fun TalkToG1Screen(
     language: AppLanguage,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onStartSafety: () -> Unit,
+    sessionId: String?,
+    onSessionIdChange: (String?) -> Unit
 ) {
-    var message by remember {
-        mutableStateOf("")
-    }
-
-    var microphonePreview by remember {
-        mutableStateOf(false)
-    }
-
+    val context = LocalContext.current
+    var message by remember { mutableStateOf("") }
+    var listening by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf("Ready to listen") }
     var messages by remember {
-        mutableStateOf(
-            listOf(
-                "G1" to "Hello! I'm G1. How can I help you?"
-            )
-        )
+        mutableStateOf(listOf("G1" to "Hello! I'm G1. How can I help you?"))
+    }
+    var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
+    var requesting by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    fun showVisitorText(text: String) {
+        if (text.isBlank()) return
+        val spoken = text.trim()
+        if (requesting) return
+        messages = messages + ("Visitor" to spoken)
+        message = ""
+        val normalized = spoken.lowercase(Locale.ROOT)
+        if (listOf(
+                "safety", "safety instructions", "safety briefing", "safety rules",
+                "lab rules", "laboratory rules", "safe in the lab",
+                "sicherheit", "sicherheitsunterweisung", "sicherheitsregeln",
+                "laborregeln", "sicherheitsanweisungen"
+            ).any { normalized.contains(it) }) {
+            status = "Opening G1 safety presentation"
+            onStartSafety()
+            return
+        }
+        requesting = true
+        status = "G1 is thinking..."
+        scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    askG1Backend(spoken, sessionId)
+                }
+                onSessionIdChange(result.sessionId)
+                messages = messages + ("G1" to result.answer)
+                status = if (result.speechAccepted) "G1 speech sent to robot" else
+                    "Answer received; robot speech unavailable"
+            } catch (error: Exception) {
+                status = "AI request failed"
+                messages = messages + ("System" to
+                        "Could not contact G1 Studio: ${error.message}")
+            } finally {
+                requesting = false
+            }
+        }
     }
 
-    fun send(text: String) {
-        if (text.isBlank()) return
+    fun startNewConversation() {
+        if (requesting || listening) return
+        requesting = true
+        status = "Starting a new conversation..."
+        scope.launch {
+            try {
+                val previousSession = sessionId
+                if (previousSession != null) {
+                    withContext(Dispatchers.IO) { resetG1Backend(previousSession) }
+                }
+                onSessionIdChange(null)
+                messages = listOf("G1" to "Hello! I'm G1. How can I help you?")
+                message = ""
+                status = "New conversation ready"
+            } catch (error: Exception) {
+                status = "Could not reset conversation"
+                messages = messages + ("System" to
+                        "Session reset failed: ${error.message}")
+            } finally {
+                requesting = false
+            }
+        }
+    }
 
-        messages = messages + ("Visitor" to text.trim())
+    val latestShowVisitorText by rememberUpdatedState<(String) -> Unit>(::showVisitorText)
 
-        messages = messages + (
-                "G1" to tr(
-                    language,
-                    "This is a preview. My AI voice service " +
-                            "will be connected through G1 Studio.",
-                    "Dies ist eine Vorschau. Mein KI-Sprachdienst " +
-                            "wird später mit G1 Studio verbunden."
-                )
-                )
+    val speechIntent = remember(language) {
+        Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE,
+                if (language == AppLanguage.DE) "de-DE" else "en-US")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+    }
 
-        message = ""
+    DisposableEffect(context) {
+        var speechRecognizerForCleanup: SpeechRecognizer? = null
+        if (SpeechRecognizer.isRecognitionAvailable(context)) {
+            val speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
+            speechRecognizer.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    listening = true
+                    status = "Listening... speak now"
+                }
+                override fun onBeginningOfSpeech() { status = "Hearing your voice..." }
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() { status = "Processing speech..." }
+                override fun onError(error: Int) {
+                    listening = false
+                    status = when (error) {
+                        SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized. Try again."
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech detected. Try again."
+                        SpeechRecognizer.ERROR_NETWORK,
+                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Speech service network error"
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission required"
+                        else -> "Speech recognition error: $error"
+                    }
+                }
+                override fun onResults(results: Bundle?) {
+                    listening = false
+                    val recognized = results?.getStringArrayList(
+                        SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                    if (!recognized.isNullOrBlank()) {
+                        status = "Speech recognized"
+                        latestShowVisitorText(recognized)
+                    } else status = "No words recognized"
+                }
+                override fun onPartialResults(partialResults: Bundle?) {}
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+            recognizer = speechRecognizer
+            speechRecognizerForCleanup = speechRecognizer
+        } else {
+            status = "No Android speech recognition service available"
+        }
+        onDispose {
+            speechRecognizerCleanup(speechRecognizerForCleanup)
+            recognizer = null
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            try {
+                recognizer?.startListening(speechIntent)
+                status = "Starting microphone..."
+            } catch (e: Exception) {
+                status = "Could not start recognition: ${e.message}"
+            }
+        } else status = "Microphone permission denied"
+    }
+
+    fun startListening() {
+        if (recognizer == null) {
+            status = "Speech recognition is unavailable on this device"
+            return
+        }
+        if (androidx.core.content.ContextCompat.checkSelfPermission(
+                context, Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED) {
+            try {
+                recognizer?.startListening(speechIntent)
+                status = "Starting microphone..."
+            } catch (e: Exception) {
+                status = "Could not start recognition: ${e.message}"
+            }
+        } else permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        ScreenTitle(
-            tr(
-                language,
-                "Talk to G1",
-                "Mit G1 sprechen"
-            ),
-            onBack
-        )
-
+        ScreenTitle(tr(language, "Talk to G1", "Mit G1 sprechen"), onBack)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Card(
                 modifier = Modifier.weight(0.9f),
-                colors = CardDefaults.cardColors(
-                    containerColor = Color.White
-                ),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(18.dp),
+                    modifier = Modifier.fillMaxWidth().padding(18.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Icon(
-                        Icons.Default.Mic,
-                        contentDescription = null,
-                        tint = Green,
-                        modifier = Modifier.size(55.dp)
-                    )
-
-                    Text(
-                        tr(
-                            language,
-                            "G1 Voice Assistant",
-                            "G1 Sprachassistent"
-                        ),
-                        color = Dark,
-                        fontSize = 19.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    Text(
-                        if (microphonePreview) {
-                            tr(
-                                language,
-                                "Listening Preview",
-                                "Hörvorschau"
-                            )
-                        } else {
-                            tr(
-                                language,
-                                "Ready",
-                                "Bereit"
-                            )
-                        },
-                        color = Green
-                    )
-
+                    Icon(Icons.Default.Mic, null, tint = Green, modifier = Modifier.size(55.dp))
+                    Text(tr(language, "G1 Voice Assistant", "G1 Sprachassistent"),
+                        color = Dark, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                    Text(status, color = Green, fontSize = 12.sp)
                     Button(
                         onClick = {
-                            microphonePreview = !microphonePreview
+                            if (listening) {
+                                recognizer?.stopListening()
+                                listening = false
+                                status = "Processing speech..."
+                            } else startListening()
                         },
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !requesting
                     ) {
-                        Icon(
-                            if (microphonePreview)
-                                Icons.Default.Stop
-                            else
-                                Icons.Default.Mic,
-                            null
-                        )
-
+                        Icon(if (listening) Icons.Default.Stop else Icons.Default.Mic, null)
                         Spacer(Modifier.width(8.dp))
-
-                        Text(
-                            if (microphonePreview) {
-                                tr(
-                                    language,
-                                    "Stop Preview",
-                                    "Vorschau stoppen"
-                                )
-                            } else {
-                                tr(
-                                    language,
-                                    "Microphone Preview",
-                                    "Mikrofonvorschau"
-                                )
-                            }
-                        )
+                        Text(if (listening) "Stop Listening" else "Start Listening")
                     }
-
-                    Text(
-                        tr(
-                            language,
-                            "Microphone and speech recognition " +
-                                    "are not connected yet.",
-                            "Mikrofon und Spracherkennung " +
-                                    "sind noch nicht verbunden."
-                        ),
-                        color = Muted,
-                        fontSize = 12.sp
-                    )
+                    Text("Speak to your tablet. Recognized speech appears in the conversation.",
+                        color = Muted, fontSize = 12.sp)
                 }
             }
-
             Card(
                 modifier = Modifier.weight(1.4f),
-                colors = CardDefaults.cardColors(
-                    containerColor = Color.White
-                ),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
+                    modifier = Modifier.fillMaxWidth().padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text(
-                        tr(
-                            language,
-                            "Conversation",
-                            "Unterhaltung"
-                        ),
-                        color = Dark,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(tr(language, "Conversation", "Unterhaltung"),
+                            modifier = Modifier.weight(1f),
+                            color = Dark, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        OutlinedButton(
+                            onClick = { startNewConversation() },
+                            enabled = !requesting && !listening
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null,
+                                modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text(tr(language, "New Conversation", "Neues Gespräch"),
+                                fontSize = 11.sp)
+                        }
+                    }
                     Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(180.dp)
+                        modifier = Modifier.fillMaxWidth().height(180.dp)
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         messages.forEach { (speaker, content) ->
                             Surface(
-                                color = if (speaker == "G1")
-                                    Mint else Background,
+                                color = if (speaker == "G1") Mint else Background,
                                 shape = RoundedCornerShape(12.dp)
                             ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(10.dp)
-                                ) {
-                                    Text(
-                                        speaker,
-                                        color = Green,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp
-                                    )
-
-                                    Text(
-                                        content,
-                                        color = Dark,
-                                        fontSize = 12.sp
-                                    )
+                                Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
+                                    Text(speaker, color = Green,
+                                        fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    Text(content, color = Dark, fontSize = 12.sp)
                                 }
                             }
                         }
                     }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(
                             value = message,
-                            onValueChange = {
-                                message = it
-                            },
-                            label = {
-                                Text(
-                                    tr(
-                                        language,
-                                        "Type a message",
-                                        "Nachricht eingeben"
-                                    )
-                                )
-                            },
+                            onValueChange = { message = it },
+                            label = { Text(tr(language, "Type a message", "Nachricht eingeben")) },
                             modifier = Modifier.weight(1f),
                             singleLine = true
                         )
-
                         Spacer(Modifier.width(8.dp))
-
-                        Button(
-                            onClick = {
-                                send(message)
-                            },
-                            enabled = message.isNotBlank()
-                        ) {
-                            Icon(
-                                Icons.Default.Send,
-                                contentDescription = "Send"
-                            )
+                        Button(onClick = { showVisitorText(message) }, enabled = message.isNotBlank() && !requesting) {
+                            Icon(Icons.Default.Send, contentDescription = "Send")
                         }
                     }
                 }
             }
         }
-
-        Notice(
-            tr(
-                language,
-                "Voice UI preview only. No audio recording, " +
-                        "AI service or robot command is connected.",
-                "Nur eine Vorschau. Audioaufnahme, " +
-                        "KI-Dienst und Roboterbefehle " +
-                        "sind nicht verbunden."
-            )
-        )
+        Notice("G1 Studio AI connected through /api/interaction/ask. Replies are sent to the physical G1 speaker when available. Safety presentation remains a separate preview.")
     }
 }
 
+private fun speechRecognizerCleanup(recognizer: SpeechRecognizer?) {
+    recognizer?.cancel()
+    recognizer?.destroy()
+}
 
+// Uses the existing FastAPI interaction endpoint. No robot motion commands.
+private data class G1AskResult(
+    val answer: String,
+    val speechAccepted: Boolean,
+    val sessionId: String
+)
 
+private fun askG1Backend(question: String, sessionId: String?): G1AskResult {
+    val connection = (URL("http://10.150.68.160:8000/api/interaction/ask")
+        .openConnection() as HttpURLConnection)
+    try {
+        connection.requestMethod = "POST"
+        connection.connectTimeout = 10000
+        connection.readTimeout = 140000
+        connection.doOutput = true
+        connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        val payload = JSONObject().put("question", question).put("speak", true)
+        if (!sessionId.isNullOrBlank()) payload.put("session_id", sessionId)
+        connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+        val code = connection.responseCode
+        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        if (code !in 200..299) throw IllegalStateException("HTTP $code: ${body.take(250)}")
+        val result = JSONObject(body)
+        return G1AskResult(
+            answer = result.getString("answer"),
+            speechAccepted = result.optBoolean("speech_accepted", false),
+            sessionId = result.getString("session_id")
+        )
+    } finally {
+        connection.disconnect()
+    }
+}
+
+// Resets only the visitor's conversational context, never robot motion.
+private fun resetG1Backend(sessionId: String) {
+    val connection = (URL("http://10.150.68.160:8000/api/interaction/reset")
+        .openConnection() as HttpURLConnection)
+    try {
+        connection.requestMethod = "POST"
+        connection.connectTimeout = 10000
+        connection.readTimeout = 15000
+        connection.doOutput = true
+        connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        val payload = JSONObject().put("session_id", sessionId)
+        connection.outputStream.use {
+            it.write(payload.toString().toByteArray(Charsets.UTF_8))
+        }
+        val code = connection.responseCode
+        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        if (code !in 200..299) {
+            throw IllegalStateException("HTTP $code: ${body.take(250)}")
+        }
+        if (!JSONObject(body).optBoolean("reset", false)) {
+            throw IllegalStateException("The session was not reset by the backend")
+        }
+    } finally {
+        connection.disconnect()
+    }
+}
