@@ -1,6 +1,8 @@
 package com.example.g1remote
 
 import android.annotation.SuppressLint
+import android.graphics.BitmapFactory
+import androidx.compose.ui.graphics.asImageBitmap
 import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.Manifest
@@ -96,6 +98,7 @@ private enum class Screen {
     WEBSITE,
     NAVIGATION,
     SAFETY_PRESENTATION,
+    VISITOR_WELCOME,
     OPERATOR,
     VOICE
 }
@@ -290,8 +293,103 @@ private fun G1RemoteApp() {
         }
     }
 
-    var screen by remember {
-        mutableStateOf(Screen.HOME)
+    var screen by remember { mutableStateOf(Screen.HOME) }
+
+    // Read-only workflow observation. On launch, ignore the previous execution
+    // so an old completed workflow cannot hijack the visitor display.
+    var observedGuidanceSessionId by remember { mutableStateOf<String?>(null) }
+    var guidanceBaselineLoaded by remember { mutableStateOf(false) }
+    var autoGuidanceSessionId by remember { mutableStateOf<String?>(null) }
+    var guidanceFinishedAt by remember { mutableStateOf<Long?>(null) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            try {
+                val guidance = G1Backend.getGuidanceStatus()
+                val id = guidance.sessionId
+                if (!guidanceBaselineLoaded) {
+                    observedGuidanceSessionId = id
+                    guidanceBaselineLoaded = true
+                } else if (id != null && id != observedGuidanceSessionId) {
+                    observedGuidanceSessionId = id
+                    // Welcome and safety must take priority over auto-navigation.
+                    if (screen != Screen.SAFETY_PRESENTATION &&
+                        screen != Screen.VISITOR_WELCOME) {
+                        autoGuidanceSessionId = id
+                        guidanceFinishedAt = null
+                        screen = Screen.NAVIGATION
+                    }
+                }
+
+                if (autoGuidanceSessionId != null &&
+                    id == autoGuidanceSessionId &&
+                    screen == Screen.NAVIGATION) {
+                    if (guidance.state in setOf("completed", "failed", "cancelled", "canceled")) {
+                        if (guidanceFinishedAt == null) {
+                            guidanceFinishedAt = android.os.SystemClock.elapsedRealtime()
+                        }
+                        if (android.os.SystemClock.elapsedRealtime() - guidanceFinishedAt!! >= 12000L) {
+                            autoGuidanceSessionId = null
+                            guidanceFinishedAt = null
+                            screen = Screen.HOME
+                        }
+                    } else {
+                        guidanceFinishedAt = null
+                    }
+                }
+            } catch (_: Exception) {
+                // Keep the visitor's current screen during a network outage.
+            }
+            delay(1000L)
+        }
+    }
+    var activeWelcomeSessionId by remember { mutableStateOf<String?>(null) }
+    var handledWelcomeSessionId by remember { mutableStateOf<String?>(null) }
+    var welcomeText by remember { mutableStateOf("") }
+    var welcomeHomeVisible by remember { mutableStateOf(false) }
+    var welcomeScreenSessionId by remember { mutableStateOf<String?>(null) }
+    var welcomeBusy by remember { mutableStateOf(false) }
+    var welcomeError by remember { mutableStateOf<String?>(null) }
+    val welcomeScope = rememberCoroutineScope()
+
+    // Observe new physical-camera visitor sessions, without controlling the robot.
+    LaunchedEffect(Unit) {
+        while (true) {
+            try {
+                val status = G1VisitorWelcomeApi.getStatus()
+                val id = status.sessionId
+                if (status.enabled && id != null &&
+                    id != handledWelcomeSessionId &&
+                    status.state in setOf("welcoming", "safety_briefing", "awaiting_acknowledgement")) {
+                    activeWelcomeSessionId = id
+                    handledWelcomeSessionId = id
+                    welcomeText = status.welcomeText
+                    welcomeHomeVisible = true
+                    welcomeError = null
+                    // Show the welcome screen for this newly detected visitor.
+                    welcomeScreenSessionId = id
+                    screen = Screen.VISITOR_WELCOME
+                }
+                // Allow a future session after the operator resets the backend.
+                if (id == null && status.state in setOf("idle", "waiting_for_visitor")) {
+                    activeWelcomeSessionId = null
+                    welcomeHomeVisible = false
+                }
+            } catch (_: Exception) {
+                // Preserve the current visitor screen during a temporary network outage.
+            }
+            delay(1000L)
+        }
+    }
+
+    // Unitree speech currently reports request acceptance, not playback completion.
+    // This is an estimated display duration, not actual audio synchronization.
+    LaunchedEffect(welcomeScreenSessionId) {
+        val session = welcomeScreenSessionId ?: return@LaunchedEffect
+        delay(12_000L)
+        if (welcomeScreenSessionId == session && screen == Screen.VISITOR_WELCOME) {
+            screen = Screen.HOME
+        }
     }
 
     // Shared across visits to the voice screen; lost when the app process ends.
@@ -311,10 +409,16 @@ private fun G1RemoteApp() {
     }
 
     val home: () -> Unit = {
+        autoGuidanceSessionId = null
+        guidanceFinishedAt = null
         screen = Screen.HOME
     }
 
     val back: () -> Unit = {
+        if (screen == Screen.NAVIGATION) {
+            autoGuidanceSessionId = null
+            guidanceFinishedAt = null
+        }
         screen = when (screen) {
             Screen.DESTINATION -> Screen.LAB_GUIDE
             Screen.DEMO_DETAIL -> Screen.DEMONSTRATIONS
@@ -349,9 +453,7 @@ private fun G1RemoteApp() {
                     language = it
                 },
                 onHome = home,
-                onOperator = {
-                    screen = Screen.OPERATOR
-                }
+                onOperator = home // Visitor tablet must never open operator controls.
             )
         }
 
@@ -364,16 +466,57 @@ private fun G1RemoteApp() {
 
                 Screen.HOME -> HomeScreen(
                     language = language,
+                    visitorWelcomed = welcomeHomeVisible,
                     onNavigate = {
                         screen = it
                     }
                 )
 
-                Screen.SAFETY_PRESENTATION ->
-                    SafetyPresentationScreen(
-                        onHome = home,
-                        autoNarrateFirstSlide = true
-                    )
+                Screen.VISITOR_WELCOME -> G1VisitorWelcomeScreen(
+                    welcomeText = welcomeText,
+                    isGerman = language == AppLanguage.DE,
+                    isLoading = welcomeBusy,
+                    error = welcomeError,
+                    onHome = home,
+                    onStartSafety = {
+                        val id = activeWelcomeSessionId
+                        if (id == null) {
+                            welcomeError = "No active visitor session. Ask the operator to start Welcome Mode."
+                        } else if (!welcomeBusy) {
+                            welcomeBusy = true
+                            welcomeError = null
+                            welcomeScope.launch {
+                                try {
+                                    val status = G1VisitorWelcomeApi.getStatus()
+                                    require(status.sessionId == id) { "Visitor session changed. Please wait for G1." }
+                                    if (status.state == "welcoming") {
+                                        G1VisitorWelcomeApi.advance(id, "welcome_completed")
+                                    } else {
+                                        require(status.state in setOf("safety_briefing", "awaiting_acknowledgement")) {
+                                            "Visitor session is not ready for safety briefing."
+                                        }
+                                    }
+                                    screen = Screen.SAFETY_PRESENTATION
+                                } catch (e: Exception) {
+                                    welcomeError = e.message ?: "Unable to start safety briefing"
+                                } finally {
+                                    welcomeBusy = false
+                                }
+                            }
+                        }
+                    }
+                )
+
+                Screen.SAFETY_PRESENTATION -> SafetyPresentationScreen(
+                    onHome = home,
+                    autoNarrateFirstSlide = true,
+                    existingSessionId = activeWelcomeSessionId,
+                    onAcknowledged = { completedId ->
+                        if (completedId == activeWelcomeSessionId) {
+                            screen = Screen.HOME
+                        }
+                    }
+                )
 
                 Screen.LAB_GUIDE -> CatalogScreen(
                     title = "Lab Guide",
@@ -437,7 +580,7 @@ private fun G1RemoteApp() {
                     onBack = back
                 )
 
-                Screen.NAVIGATION -> NavigationPreview(
+                Screen.NAVIGATION -> GuidanceStatusScreen(
                     onBack = back
                 )
 
@@ -446,15 +589,103 @@ private fun G1RemoteApp() {
                     language = language,
                     onBack = back,
                     onStartSafety = { screen = Screen.SAFETY_PRESENTATION },
+                    onGuidanceStarted = { guidanceSessionId ->
+                        observedGuidanceSessionId = guidanceSessionId
+                        autoGuidanceSessionId = guidanceSessionId
+                        guidanceFinishedAt = null
+                        screen = Screen.NAVIGATION
+                    },
                     sessionId = visitorSessionId,
                     onSessionIdChange = { visitorSessionId = it }
                 )
 
-                // Existing operator control remains.
-                Screen.OPERATOR -> G1RemoteOperatorPreviewScreen(
-                    onBack = back,
-                    onHome = home
+                // No operator controls are reachable from the visitor tablet.
+                Screen.OPERATOR -> HomeScreen(language = language, onNavigate = { screen = it })
+            }
+        }
+    }
+}
+
+// ======================================================
+// VISITOR WELCOME — READ-ONLY DISPLAY
+// ======================================================
+
+@Composable
+private fun G1VisitorWelcomeScreen(
+    welcomeText: String,
+    isGerman: Boolean,
+    isLoading: Boolean,
+    error: String?,
+    onStartSafety: () -> Unit,
+    onHome: () -> Unit
+) {
+    Box(
+        modifier = Modifier.fillMaxSize().background(Background).padding(20.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = Mint)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(24.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(24.dp)
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.robot),
+                    contentDescription = "Unitree G1 humanoid robot",
+                    modifier = Modifier.width(180.dp).height(230.dp)
+                        .clip(RoundedCornerShape(18.dp)),
+                    contentScale = ContentScale.Crop
                 )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        if (isGerman) "Willkommen bei IPSE!" else "Welcome to IPSE!",
+                        fontSize = 30.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Green
+                    )
+                    Text(
+                        if (isGerman) "G1 begrüßt Sie gerade" else "G1 is welcoming you",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Dark
+                    )
+                    Text(
+                        welcomeText.ifBlank {
+                            "Hello! Welcome to the Institute for Product and Service Engineering."
+                        },
+                        fontSize = 15.sp,
+                        color = Dark
+                    )
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = Green
+                    )
+                    Text(
+                        if (isGerman)
+                            "Die Startseite erscheint gleich automatisch."
+                        else "Home will open automatically in a moment.",
+                        fontSize = 12.sp,
+                        color = Muted
+                    )
+                    if (error != null) {
+                        Text(error, color = MaterialTheme.colorScheme.error)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(onClick = onHome) {
+                            Text(if (isGerman) "Zur Startseite" else "Go to Home")
+                        }
+                        OutlinedButton(onClick = onStartSafety, enabled = !isLoading) {
+                            Text(if (isGerman) "Sicherheit" else "Safety briefing")
+                        }
+                    }
+                }
             }
         }
     }
@@ -589,20 +820,12 @@ private fun RemoteHeader(
 
         IconButton(
             onClick = {
-                if (isHome) {
-                    onOperator()
-                } else {
-                    onHome()
-                }
+                onHome()
             }
         ) {
 
             Icon(
-                if (isHome) {
-                    Icons.Default.Lock
-                } else {
-                    Icons.Default.Home
-                },
+                Icons.Default.Home,
                 contentDescription = "Navigation",
                 tint = Green
             )
@@ -618,7 +841,8 @@ private fun RemoteHeader(
 @Composable
 private fun HomeScreen(
     language: AppLanguage,
-    onNavigate: (Screen) -> Unit
+    onNavigate: (Screen) -> Unit,
+    visitorWelcomed: Boolean = false
 ) {
 
     data class HomeTile(
@@ -686,6 +910,26 @@ private fun HomeScreen(
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+
+        if (visitorWelcomed) {
+            Surface(color = Mint, shape = RoundedCornerShape(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Green)
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        tr(language,
+                            "Welcome to IPSE! G1 is ready to assist you.",
+                            "Willkommen bei IPSE! G1 hilft Ihnen gerne."),
+                        color = Dark,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+        }
 
         // ORIGINAL G1 BANNER
         Card(
@@ -878,11 +1122,48 @@ private fun HomeScreen(
 
 
 // ======================================================
-// HOME CAMERA PREVIEW — UI ONLY, NO CAMERA CONNECTION
+// HOME CAMERA PREVIEW — READ-ONLY G1 SDK2 SNAPSHOTS
 // ======================================================
+
+private const val G1_CAMERA_SNAPSHOT_URL = "http://10.150.68.160:8770/snapshot"
 
 @Composable
 private fun HomeCameraPreview(language: AppLanguage) {
+    var frame by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    var cameraError by remember { mutableStateOf<String?>(null) }
+
+    // Fetch snapshots only while Home is displayed; no robot control commands.
+    LaunchedEffect(Unit) {
+        while (true) {
+            try {
+                val bitmap = withContext(Dispatchers.IO) {
+                    val connection = (URL(G1_CAMERA_SNAPSHOT_URL).openConnection()
+                            as HttpURLConnection)
+                    try {
+                        connection.connectTimeout = 2500
+                        connection.readTimeout = 2500
+                        connection.setRequestProperty("Cache-Control", "no-cache")
+                        if (connection.responseCode != 200) {
+                            throw IllegalStateException("Camera HTTP ${connection.responseCode}")
+                        }
+                        connection.inputStream.use { stream ->
+                            BitmapFactory.decodeStream(stream)
+                                ?: throw IllegalStateException("Invalid camera image")
+                        }
+                    } finally {
+                        connection.disconnect()
+                    }
+                }
+                frame = bitmap.asImageBitmap()
+                cameraError = null
+            } catch (e: Exception) {
+                frame = null
+                cameraError = e.message ?: "Camera unavailable"
+            }
+            delay(1000L)
+        }
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -890,67 +1171,60 @@ private fun HomeCameraPreview(language: AppLanguage) {
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(112.dp)
-                .padding(10.dp),
+            modifier = Modifier.fillMaxWidth().height(140.dp).padding(10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Box(
-                modifier = Modifier
-                    .width(180.dp)
-                    .fillMaxHeight()
+                modifier = Modifier.width(220.dp).fillMaxHeight()
                     .clip(RoundedCornerShape(12.dp))
                     .background(Color(0xFF1B2A25)),
                 contentAlignment = Alignment.Center
             ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.VideocamOff,
-                        contentDescription = null,
-                        tint = Color.White.copy(alpha = 0.75f),
-                        modifier = Modifier.size(28.dp)
+                if (frame != null) {
+                    Image(
+                        bitmap = frame!!,
+                        contentDescription = "Physical G1 camera preview",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
                     )
-                    Text(
-                        text = tr(language, "No video signal", "Kein Videosignal"),
-                        color = Color.White.copy(alpha = 0.85f),
-                        fontSize = 11.sp
-                    )
+                } else {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.VideocamOff, null, tint = Color.White)
+                        Text(
+                            tr(language, "Camera unavailable", "Kamera nicht verfügbar"),
+                            color = Color.White,
+                            fontSize = 11.sp
+                        )
+                    }
                 }
             }
-
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(5.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Videocam, null, tint = Green, modifier = Modifier.size(19.dp))
+                    Icon(Icons.Default.Videocam, null, tint = Green)
                     Spacer(Modifier.width(7.dp))
                     Text(
-                        text = tr(language, "G1 Live Camera", "G1 Live-Kamera"),
+                        tr(language, "G1 Live Camera", "G1 Live-Kamera"),
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = Dark
                     )
                 }
                 Text(
-                    text = tr(language, "Camera not connected", "Kamera nicht verbunden"),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Muted
+                    if (frame != null) tr(language, "Connected · Refreshes every second", "Verbunden · Aktualisierung jede Sekunde")
+                    else tr(language, "Not connected", "Nicht verbunden"),
+                    color = if (frame != null) Green else Muted,
+                    fontSize = 12.sp
                 )
                 Text(
-                    text = tr(
-                        language,
-                        "Live view will appear here when an external camera is installed.",
-                        "Die Live-Ansicht erscheint hier, sobald eine externe Kamera installiert ist."
-                    ),
-                    fontSize = 11.sp,
+                    cameraError ?: tr(language,
+                        "Read-only view from G1's physical camera.",
+                        "Nur-Lese-Ansicht der G1-Kamera."),
                     color = Muted,
+                    fontSize = 11.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -1050,7 +1324,9 @@ private fun estimatedSafetyNarrationMs(text: String): Long {
 @Composable
 private fun SafetyPresentationScreen(
     onHome: () -> Unit,
-    autoNarrateFirstSlide: Boolean = false
+    autoNarrateFirstSlide: Boolean = false,
+    existingSessionId: String? = null,
+    onAcknowledged: (String) -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     var briefing by remember { mutableStateOf<ApiSafetyBriefing?>(null) }
@@ -1067,13 +1343,34 @@ private fun SafetyPresentationScreen(
     var narrationRunning by remember { mutableStateOf(false) }
     var remainingMs by remember { mutableLongStateOf(0L) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(existingSessionId) {
         busy = true
         try {
+            // The visitor may open Safety later from Home or by voice.
+            // Only then transition the welcome workflow to safety_briefing.
+            if (existingSessionId != null) {
+                val welcomeStatus = G1VisitorWelcomeApi.getStatus()
+                require(welcomeStatus.sessionId == existingSessionId) {
+                    "Visitor session changed. Please ask the operator to reset Welcome Mode."
+                }
+                if (welcomeStatus.state == "welcoming") {
+                    G1VisitorWelcomeApi.advance(existingSessionId, "welcome_completed")
+                }
+            }
             val data = withContext(Dispatchers.IO) { fetchSafetyBriefing() }
-            val session = withContext(Dispatchers.IO) { safetyHttp("/sessions", "POST") }
+            val resolvedSessionId = if (existingSessionId != null) {
+                // Validate the exact Welcome Manager session; never create a second one.
+                withContext(Dispatchers.IO) {
+                    safetyHttp("/sessions/$existingSessionId")
+                }
+                existingSessionId
+            } else {
+                // Standalone safety preview from Home, separate from an active visitor welcome.
+                val session = withContext(Dispatchers.IO) { safetyHttp("/sessions", "POST") }
+                session.getString("session_id")
+            }
             briefing = data
-            sessionId = session.getString("session_id")
+            sessionId = resolvedSessionId
             if (data.slides.isNotEmpty()) visitedSlideIds = setOf(data.slides.first().id)
             error = null
         } catch (exception: Exception) {
@@ -1259,7 +1556,17 @@ private fun SafetyPresentationScreen(
                             withContext(Dispatchers.IO) {
                                 safetyHttp("/sessions/$id/acknowledge", "POST", payload)
                             }
+                            if (existingSessionId != null) {
+                                // Safety SQLite acknowledgement must succeed first.
+                                val current = G1VisitorWelcomeApi.getStatus()
+                                require(current.sessionId == id) { "Welcome session changed during acknowledgement" }
+                                if (current.state == "safety_briefing") {
+                                    G1VisitorWelcomeApi.advance(id, "briefing_completed")
+                                }
+                                G1VisitorWelcomeApi.advance(id, "acknowledge_safety")
+                            }
                             acknowledged = true
+                            onAcknowledged(id)
                         } catch (exception: Exception) {
                             error = exception.message ?: "Acknowledgement failed"
                         } finally { busy = false }
@@ -2457,6 +2764,7 @@ private fun TalkToG1Screen(
     language: AppLanguage,
     onBack: () -> Unit,
     onStartSafety: () -> Unit,
+    onGuidanceStarted: (String) -> Unit,
     sessionId: String?,
     onSessionIdChange: (String?) -> Unit
 ) {
@@ -2486,6 +2794,28 @@ private fun TalkToG1Screen(
             ).any { normalized.contains(it) }) {
             status = "Opening G1 safety presentation"
             onStartSafety()
+            return
+        }
+        if (isCoffeeGuidanceRequest(normalized)) {
+            requesting = true
+            status = "Starting coffee-machine guidance..."
+            scope.launch {
+                try {
+                    val guidanceSessionId = withContext(Dispatchers.IO) {
+                        startCoffeeGuidance()
+                    }
+                    messages = messages + ("G1" to
+                            "Coffee-machine guidance started. Opening navigation display.")
+                    status = "Guidance started"
+                    onGuidanceStarted(guidanceSessionId)
+                } catch (error: Exception) {
+                    status = "Could not start guidance"
+                    messages = messages + ("System" to
+                            "Guidance unavailable: ${error.message}")
+                } finally {
+                    requesting = false
+                }
+            }
             return
         }
         requesting = true
@@ -2724,6 +3054,49 @@ private fun TalkToG1Screen(
             }
         }
         Notice("G1 Studio AI connected through /api/interaction/ask. Replies are sent to the physical G1 speaker when available. Safety presentation remains a separate preview.")
+    }
+}
+
+// Recognize explicit coffee-machine guidance requests only.
+// General questions about coffee still go to the AI conversation endpoint.
+private fun isCoffeeGuidanceRequest(text: String): Boolean {
+    val normalized = text.lowercase(Locale.ROOT)
+    val coffee = listOf("coffee machine", "coffee maker", "coffeemachine",
+        "kaffeemaschine", "kaffeeautomat", "kaffee maschine")
+        .any { normalized.contains(it) }
+    val guidance = listOf("guide", "take me", "show me", "lead me", "bring me",
+        "navigate", "walk me", "way to", "directions to", "where is",
+        "führ", "fuehr", "zeig", "bring mich", "begleit", "weg zur",
+        "wo ist").any { normalized.contains(it) }
+    return coffee && guidance
+}
+
+// Visitor intent starts the existing simulation-only Task Engine workflow.
+// The backend validates destination, robot mode, and permitted actions.
+private fun startCoffeeGuidance(): String {
+    val connection = (URL("http://10.150.68.160:8000/api/visitor-guidance/start")
+        .openConnection() as HttpURLConnection)
+    try {
+        connection.requestMethod = "POST"
+        connection.connectTimeout = 10000
+        connection.readTimeout = 30000
+        connection.doOutput = true
+        connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        val payload = JSONObject().put("destination", "coffee_machine")
+        connection.outputStream.use {
+            it.write(payload.toString().toByteArray(Charsets.UTF_8))
+        }
+        val code = connection.responseCode
+        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        if (code !in 200..299) {
+            throw IllegalStateException("HTTP $code: ${body.take(250)}")
+        }
+        val session = JSONObject(body).optString("session_id")
+        require(session.isNotBlank()) { "Guidance started without a session ID" }
+        return session
+    } finally {
+        connection.disconnect()
     }
 }
 
