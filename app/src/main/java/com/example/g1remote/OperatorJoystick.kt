@@ -1,9 +1,6 @@
-
 package com.example.g1remote
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -11,82 +8,117 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowForward
-import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 private val OperatorGreen = Color(0xFF087B39)
 private val OperatorMint = Color(0xFFE7F5EC)
 private val OperatorDark = Color(0xFF172820)
 private val OperatorMuted = Color(0xFF64756B)
 private val OperatorBackground = Color(0xFFF7F9F8)
+private val StopRed = Color(0xFFB3261E)
 
-// DEMONSTRATION ONLY.
-// Never use this hardcoded PIN to authorize
-// real robot movement.
-private const val DEMO_PIN = "1234"
+private const val SEND_PERIOD_MS = 100L      // 10 Hz (server dead-man: 300 ms)
+private const val RECONNECT_PERIOD_MS = 1000L
+private const val SLOW_SCALE = 0.5f
 
-private enum class PreviewMotion(
-    val label: String,
-    val vx: Float,
-    val vy: Float,
-    val yaw: Float
-) {
-    STOP("STOPPED", 0f, 0f, 0f),
-    FORWARD("FORWARD", 0.15f, 0f, 0f),
-    BACKWARD("BACKWARD", -0.15f, 0f, 0f),
-    LEFT("LEFT", 0f, 0.10f, 0f),
-    RIGHT("RIGHT", 0f, -0.10f, 0f),
-    ROTATE_LEFT("ROTATE LEFT", 0f, 0f, 0.20f),
-    ROTATE_RIGHT("ROTATE RIGHT", 0f, 0f, -0.20f)
-}
-
+/**
+ * Real operator joystick for the G1.
+ *
+ * Left stick: walk (up = forward, sideways = strafe).
+ * Right stick: turn (horizontal only).
+ * Releasing a stick sends zero; leaving the screen stops and locks.
+ * All limits and safety checks are enforced on the robot server.
+ */
 @Composable
 fun OperatorJoystickScreen(
     onBack: () -> Unit,
     onHome: () -> Unit
 ) {
+    val client = remember { G1TeleopClient() }
+    val scope = rememberCoroutineScope()
+
+    val status by client.status.collectAsState()
+    val connection by client.connection.collectAsState()
+    val message by client.message.collectAsState()
+    val token by client.token.collectAsState()
+    val unlocked = token != null
+
     var pin by remember { mutableStateOf("") }
-    var unlocked by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf(false) }
-    var motion by remember { mutableStateOf(PreviewMotion.STOP) }
+    var operatorName by remember { mutableStateOf("") }
+    var unlockError by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var slowMode by remember { mutableStateOf(true) }
 
-    fun stop() {
-        motion = PreviewMotion.STOP
-    }
+    // Raw stick values (-1..1). nx: right+, ny: up+.
+    var walkX by remember { mutableStateOf(0f) }
+    var walkY by remember { mutableStateOf(0f) }
+    var turnX by remember { mutableStateOf(0f) }
 
-    fun lock() {
-        stop()
-        unlocked = false
-        pin = ""
-        error = false
-    }
+    // Robot mode change (damp / stand_up / walk) waiting for confirmation.
+    var pendingMode by remember { mutableStateOf<String?>(null) }
+    var modeBusy by remember { mutableStateOf(false) }
 
-    // When the screen closes, reset preview movement.
-    DisposableEffect(Unit) {
-        onDispose {
-            stop()
+    // Poll status while locked (who has control, robot FSM).
+    LaunchedEffect(unlocked) {
+        while (isActive && client.token.value == null) {
+            client.refreshStatus()
+            delay(1000L)
         }
     }
+
+    // Stream joystick at 10 Hz while unlocked. Zeros are sent too,
+    // which keeps the dead-man alive and lets the robot slow down smoothly.
+    LaunchedEffect(unlocked) {
+        if (!unlocked) return@LaunchedEffect
+        var lastConnectAttempt = 0L
+        while (isActive && client.token.value != null) {
+            val now = System.currentTimeMillis()
+            if (client.connection.value == TeleopConnection.DISCONNECTED &&
+                now - lastConnectAttempt > RECONNECT_PERIOD_MS
+            ) {
+                lastConnectAttempt = now
+                client.connect()
+            }
+            client.sendCommand(
+                x = walkY,          // stick up    -> forward
+                y = -walkX,         // stick right -> move right (robot -y)
+                yaw = -turnX,       // stick right -> turn right (robot -yaw)
+                scale = if (slowMode) SLOW_SCALE else 1f
+            )
+            delay(SEND_PERIOD_MS)
+        }
+    }
+
+    // Leaving the screen: stop and release control.
+    DisposableEffect(Unit) {
+        onDispose {
+            CoroutineScope(Dispatchers.IO).launch { client.lock() }
+        }
+    }
+
+    val connected = connection == TeleopConnection.CONNECTED
+    val sticksEnabled = unlocked && connected && status?.estop != true
 
     Column(
         modifier = Modifier
@@ -96,26 +128,17 @@ fun OperatorJoystickScreen(
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        // ---------------- Header ----------------
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            OutlinedButton(
-                onClick = {
-                    stop()
-                    onBack()
-                }
-            ) {
-                Icon(
-                    Icons.Default.ArrowBack,
-                    contentDescription = null
-                )
+            OutlinedButton(onClick = onBack) {
+                Icon(Icons.Default.ArrowBack, contentDescription = null)
                 Spacer(Modifier.width(5.dp))
                 Text("Back")
             }
-
             Spacer(Modifier.width(14.dp))
-
             Text(
                 "G1 Operator Joystick",
                 modifier = Modifier.weight(1f),
@@ -123,44 +146,16 @@ fun OperatorJoystickScreen(
                 fontWeight = FontWeight.Bold,
                 color = OperatorDark
             )
-
-            Surface(
-                color = Color(0xFFFFF1DA),
-                shape = RoundedCornerShape(10.dp)
-            ) {
-                Text(
-                    "SIMULATION ONLY",
-                    modifier = Modifier.padding(
-                        horizontal = 12.dp,
-                        vertical = 8.dp
-                    ),
-                    color = Color(0xFF8B5700),
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp
-                )
-            }
-
+            ConnectionChip(unlocked = unlocked, connection = connection)
             Spacer(Modifier.width(10.dp))
-
-            IconButton(
-                onClick = {
-                    stop()
-                    onHome()
-                }
-            ) {
-                Icon(
-                    Icons.Default.Home,
-                    contentDescription = "Home",
-                    tint = OperatorGreen
-                )
+            IconButton(onClick = onHome) {
+                Icon(Icons.Default.Home, contentDescription = "Home", tint = OperatorGreen)
             }
         }
 
-        // PIN entry is directly above the joystick.
+        // ---------------- Unlock / session bar ----------------
         Card(
-            colors = CardDefaults.cardColors(
-                containerColor = Color.White
-            ),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
             shape = RoundedCornerShape(14.dp)
         ) {
             Row(
@@ -171,81 +166,93 @@ fun OperatorJoystickScreen(
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Icon(
-                    if (unlocked)
-                        Icons.Default.LockOpen
-                    else
-                        Icons.Default.Lock,
+                    if (unlocked) Icons.Default.LockOpen else Icons.Default.Lock,
                     contentDescription = null,
                     tint = OperatorGreen,
                     modifier = Modifier.size(28.dp)
                 )
 
-                Column(
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        if (unlocked)
-                            "Operator Preview Unlocked"
-                        else
-                            "Operator PIN Required",
-                        color = OperatorDark,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp
-                    )
-
-                    Text(
-                        if (unlocked)
-                            "Joystick UI enabled · Robot disconnected"
-                        else
-                            "Enter demo PIN to enable joystick preview",
-                        color = OperatorMuted,
-                        fontSize = 11.sp
-                    )
-                }
-
                 if (!unlocked) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Operator PIN required",
+                            color = OperatorDark,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
+                        )
+                        val holder = status?.operator
+                        Text(
+                            if (status?.teleopActive == true && holder != null)
+                                "Currently controlled by: $holder"
+                            else
+                                "PIN is checked on the robot server",
+                            color = OperatorMuted,
+                            fontSize = 11.sp
+                        )
+                    }
+                    OutlinedTextField(
+                        value = operatorName,
+                        onValueChange = { operatorName = it.take(20) },
+                        modifier = Modifier.width(150.dp),
+                        singleLine = true,
+                        label = { Text("Name") }
+                    )
                     OutlinedTextField(
                         value = pin,
-                        onValueChange = { value ->
-                            pin = value
-                                .filter { it.isDigit() }
-                                .take(4)
-                            error = false
+                        onValueChange = { v ->
+                            pin = v.filter { it.isDigit() }.take(8)
+                            unlockError = null
                         },
                         modifier = Modifier.width(130.dp),
                         singleLine = true,
                         label = { Text("PIN") },
-                        isError = error,
-                        visualTransformation =
-                            PasswordVisualTransformation(),
+                        isError = unlockError != null,
+                        visualTransformation = PasswordVisualTransformation(),
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.NumberPassword
                         )
                     )
-
                     Button(
                         onClick = {
-                            if (pin == DEMO_PIN) {
-                                unlocked = true
-                                error = false
-                                stop()
-                            } else {
-                                error = true
+                            busy = true
+                            scope.launch {
+                                unlockError = client.unlock(
+                                    pin,
+                                    operatorName.ifBlank { "operator" }
+                                )
                                 pin = ""
+                                busy = false
                             }
                         },
-                        enabled = pin.length == 4
+                        enabled = pin.length >= 4 && !busy
                     ) {
-                        Text("Unlock")
+                        Text(if (busy) "..." else "Unlock")
                     }
                 } else {
-                    OutlinedButton(
-                        onClick = { lock() }
-                    ) {
-                        Icon(
-                            Icons.Default.Lock,
-                            contentDescription = null
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "You have control",
+                            color = OperatorDark,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
                         )
+                        Text(
+                            "Release a stick to stop. Leaving this screen locks control.",
+                            color = OperatorMuted,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Slow", fontSize = 12.sp, color = OperatorDark)
+                        Switch(
+                            checked = !slowMode,
+                            onCheckedChange = { slowMode = !it },
+                            modifier = Modifier.padding(horizontal = 6.dp)
+                        )
+                        Text("Normal", fontSize = 12.sp, color = OperatorDark)
+                    }
+                    OutlinedButton(onClick = { scope.launch { client.lock() } }) {
+                        Icon(Icons.Default.Lock, contentDescription = null)
                         Spacer(Modifier.width(5.dp))
                         Text("Lock")
                     }
@@ -253,271 +260,161 @@ fun OperatorJoystickScreen(
             }
         }
 
-        if (error) {
-            Text(
-                "Incorrect PIN. Please try again.",
-                color = MaterialTheme.colorScheme.error,
-                fontSize = 12.sp
+        unlockError?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+        }
+
+        message?.let { msg ->
+            Surface(color = Color(0xFFFFF1DA), shape = RoundedCornerShape(10.dp)) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFF8B5700))
+                    Spacer(Modifier.width(8.dp))
+                    Text(msg, color = Color(0xFF8B5700), fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { client.clearMessage() }) {
+                        Icon(Icons.Default.Close, contentDescription = "Dismiss")
+                    }
+                }
+            }
+        }
+
+        // ---------------- Sticks + controls ----------------
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            StickCard(
+                title = "Walk",
+                hint = "Up = forward · sideways = step",
+                modifier = Modifier.weight(1f)
+            ) {
+                VirtualJoystick(
+                    enabled = sticksEnabled,
+                    onChange = { nx, ny ->
+                        walkX = nx
+                        walkY = ny
+                    }
+                )
+            }
+
+            Column(
+                modifier = Modifier.weight(0.9f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // STOP is always available, even when locked.
+                Button(
+                    onClick = { scope.launch { client.stop() } },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(72.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = StopRed),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(Icons.Default.Stop, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("STOP", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                }
+
+                if (status?.estop == true) {
+                    Surface(
+                        color = StopRed.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "SOFTWARE E-STOP ACTIVE" +
+                                    (status?.estopReason?.takeIf { it.isNotBlank() }
+                                        ?.let { " ($it)" } ?: ""),
+                            modifier = Modifier.padding(10.dp),
+                            color = StopRed,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                client.resetEstop()?.let { unlockError = it }
+                            }
+                        },
+                        enabled = unlocked,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null)
+                        Spacer(Modifier.width(5.dp))
+                        Text("Reset E-stop")
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = { scope.launch { client.estop() } },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = StopRed)
+                    ) {
+                        Icon(Icons.Default.Warning, contentDescription = null)
+                        Spacer(Modifier.width(5.dp))
+                        Text("Software E-STOP (latched)")
+                    }
+                }
+
+                StatusPanel(status = status, connected = connected, unlocked = unlocked)
+            }
+
+            StickCard(
+                title = "Turn",
+                hint = "Left / right = rotate",
+                modifier = Modifier.weight(1f)
+            ) {
+                VirtualJoystick(
+                    enabled = sticksEnabled,
+                    horizontalOnly = true,
+                    onChange = { nx, _ -> turnX = nx }
+                )
+            }
+        }
+
+        RobotModeCard(
+            status = status,
+            enabled = unlocked && !modeBusy,
+            busy = modeBusy,
+            onRequest = { pendingMode = it }
+        )
+
+        pendingMode?.let { mode ->
+            AlertDialog(
+                onDismissRequest = { pendingMode = null },
+                title = { Text(modeTitle(mode)) },
+                text = { Text(modeWarning(mode)) },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            pendingMode = null
+                            modeBusy = true
+                            scope.launch {
+                                unlockError = client.setMode(mode)
+                                modeBusy = false
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (mode == "damp") StopRed else OperatorGreen
+                        )
+                    ) { Text("Yes, ${modeTitle(mode)}") }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = { pendingMode = null }) { Text("Cancel") }
+                }
             )
         }
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 260.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            // Main directional control
-            Card(
-                modifier = Modifier.weight(1.25f),
-                colors = CardDefaults.cardColors(
-                    containerColor = Color.White
-                ),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(9.dp)
-                ) {
-                    Text(
-                        "Walking Direction",
-                        fontWeight = FontWeight.Bold,
-                        color = OperatorDark,
-                        fontSize = 16.sp
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        HoldDirectionButton(
-                            label = "Forward",
-                            icon = Icons.Default.ArrowUpward,
-                            enabled = unlocked,
-                            active = motion == PreviewMotion.FORWARD,
-                            onPress = {
-                                motion = PreviewMotion.FORWARD
-                            },
-                            onRelease = { stop() }
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement =
-                            Arrangement.spacedBy(
-                                10.dp,
-                                Alignment.CenterHorizontally
-                            ),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        HoldDirectionButton(
-                            label = "Left",
-                            icon = Icons.Default.KeyboardArrowLeft,
-                            enabled = unlocked,
-                            active = motion == PreviewMotion.LEFT,
-                            onPress = {
-                                motion = PreviewMotion.LEFT
-                            },
-                            onRelease = { stop() }
-                        )
-
-                        Button(
-                            onClick = { stop() },
-                            modifier = Modifier
-                                .width(105.dp)
-                                .height(68.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFB3261E)
-                            ),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            Column(
-                                horizontalAlignment =
-                                    Alignment.CenterHorizontally
-                            ) {
-                                Icon(
-                                    Icons.Default.Stop,
-                                    contentDescription = null
-                                )
-                                Text(
-                                    "STOP",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp
-                                )
-                            }
-                        }
-
-                        HoldDirectionButton(
-                            label = "Right",
-                            icon = Icons.Default.KeyboardArrowRight,
-                            enabled = unlocked,
-                            active = motion == PreviewMotion.RIGHT,
-                            onPress = {
-                                motion = PreviewMotion.RIGHT
-                            },
-                            onRelease = { stop() }
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        HoldDirectionButton(
-                            label = "Backward",
-                            icon = Icons.Default.ArrowDownward,
-                            enabled = unlocked,
-                            active = motion == PreviewMotion.BACKWARD,
-                            onPress = {
-                                motion = PreviewMotion.BACKWARD
-                            },
-                            onRelease = { stop() }
-                        )
-                    }
-                }
-            }
-
-            // Rotation controls
-            Card(
-                modifier = Modifier.weight(0.85f),
-                colors = CardDefaults.cardColors(
-                    containerColor = Color.White
-                ),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    Text(
-                        "Robot Rotation",
-                        fontWeight = FontWeight.Bold,
-                        color = OperatorDark,
-                        fontSize = 16.sp
-                    )
-
-                    HoldDirectionButton(
-                        label = "Rotate Left",
-                        icon = Icons.Default.Refresh,
-                        enabled = unlocked,
-                        active = motion == PreviewMotion.ROTATE_LEFT,
-                        onPress = {
-                            motion = PreviewMotion.ROTATE_LEFT
-                        },
-                        onRelease = { stop() },
-                        wide = true
-                    )
-
-                    HoldDirectionButton(
-                        label = "Rotate Right",
-                        icon = Icons.Default.Refresh,
-                        enabled = unlocked,
-                        active = motion == PreviewMotion.ROTATE_RIGHT,
-                        onPress = {
-                            motion = PreviewMotion.ROTATE_RIGHT
-                        },
-                        onRelease = { stop() },
-                        wide = true
-                    )
-
-                    Text(
-                        "Press and hold to preview movement.",
-                        color = OperatorMuted,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-
-            // Status and velocity preview
-            Card(
-                modifier = Modifier.weight(0.95f),
-                colors = CardDefaults.cardColors(
-                    containerColor = OperatorMint
-                ),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text(
-                        "Motion Preview",
-                        color = OperatorDark,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    Surface(
-                        color = if (motion == PreviewMotion.STOP)
-                            Color.White
-                        else
-                            Color(0xFFD3F4DE),
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Text(
-                            motion.label,
-                            modifier = Modifier.padding(12.dp),
-                            color = OperatorGreen,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    Text(
-                        "vx: %.2f m/s".format(motion.vx),
-                        color = OperatorDark,
-                        fontSize = 13.sp
-                    )
-
-                    Text(
-                        "vy: %.2f m/s".format(motion.vy),
-                        color = OperatorDark,
-                        fontSize = 13.sp
-                    )
-
-                    Text(
-                        "yaw: %.2f rad/s".format(motion.yaw),
-                        color = OperatorDark,
-                        fontSize = 13.sp
-                    )
-
-                    HorizontalDivider()
-
-                    Text(
-                        "Robot: Not connected",
-                        color = OperatorMuted,
-                        fontSize = 12.sp
-                    )
-
-                    Text(
-                        "Physical motion: DISABLED",
-                        color = Color(0xFF9D4B00),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
-
-        Surface(
-            color = OperatorMint,
-            shape = RoundedCornerShape(12.dp)
-        ) {
+        Surface(color = OperatorMint, shape = RoundedCornerShape(12.dp)) {
             Text(
-                "Demo PIN 1234 unlocks the interface only. " +
-                        "No movement commands are sent to Unitree G1. " +
-                        "Real control requires G1 Studio authentication, " +
-                        "motion safety checks and an independent " +
-                        "physical emergency stop.",
+                "The physical E-stop / remote remains the primary safety device. " +
+                        "The robot stops automatically if this app stops sending " +
+                        "(released stick, closed screen, Wi-Fi loss) and only moves " +
+                        "in walking mode (FSM 500). Speeds are limited on the robot.",
                 modifier = Modifier.padding(12.dp),
                 color = OperatorDark,
                 fontSize = 11.sp
@@ -527,71 +424,186 @@ fun OperatorJoystickScreen(
 }
 
 @Composable
-private fun HoldDirectionButton(
-    label: String,
-    icon: ImageVector,
-    enabled: Boolean,
-    active: Boolean,
-    onPress: () -> Unit,
-    onRelease: () -> Unit,
-    wide: Boolean = false
-) {
-    val shape = RoundedCornerShape(14.dp)
-
-    val backgroundColor = when {
-        !enabled -> Color(0xFFE8EBE9)
-        active -> OperatorGreen
-        else -> OperatorMint
+private fun ConnectionChip(unlocked: Boolean, connection: TeleopConnection) {
+    val (label, bg, fg) = when {
+        !unlocked -> Triple("LOCKED", Color(0xFFE8EBE9), OperatorMuted)
+        connection == TeleopConnection.CONNECTED ->
+            Triple("LIVE", OperatorMint, OperatorGreen)
+        connection == TeleopConnection.CONNECTING ->
+            Triple("CONNECTING…", Color(0xFFFFF1DA), Color(0xFF8B5700))
+        else -> Triple("DISCONNECTED", StopRed.copy(alpha = 0.12f), StopRed)
     }
-
-    val contentColor = when {
-        !enabled -> Color.Gray
-        active -> Color.White
-        else -> OperatorGreen
-    }
-
-    Column(
-        modifier = Modifier
-            .width(if (wide) 165.dp else 105.dp)
-            .height(68.dp)
-            .background(backgroundColor, shape)
-            .border(
-                width = 1.dp,
-                color = if (active)
-                    OperatorGreen
-                else
-                    Color(0xFFDCE7DF),
-                shape = shape
-            )
-            .pointerInput(enabled) {
-                if (enabled) {
-                    detectTapGestures(
-                        onPress = {
-                            onPress()
-                            try {
-                                tryAwaitRelease()
-                            } finally {
-                                onRelease()
-                            }
-                        }
-                    )
-                }
-            },
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = contentColor,
-            modifier = Modifier.size(25.dp)
-        )
-
+    Surface(color = bg, shape = RoundedCornerShape(10.dp)) {
         Text(
             label,
-            color = contentColor,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            color = fg,
+            fontWeight = FontWeight.Bold,
+            fontSize = 11.sp
         )
+    }
+}
+
+@Composable
+private fun StickCard(
+    title: String,
+    hint: String,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(title, fontWeight = FontWeight.Bold, color = OperatorDark, fontSize = 16.sp)
+            content()
+            Text(hint, color = OperatorMuted, fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun StatusPanel(status: TeleopStatus?, connected: Boolean, unlocked: Boolean) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        shape = RoundedCornerShape(14.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            val stateText = when {
+                status == null -> "No data from robot"
+                !unlocked -> "Locked"
+                !connected -> "Reconnecting…"
+                else -> when (status.state) {
+                    "driving" -> "Driving"
+                    "ready" -> "Ready"
+                    "idle" -> "Ready"
+                    "estop" -> "E-stop active"
+                    "not_locomotion_ready" -> "Robot not in walking mode"
+                    "gesture" -> "Performing gesture…"
+                    "locked" -> "Locked"
+                    else -> status.state
+                }
+            }
+            Text(stateText, color = OperatorGreen, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+
+            val fsm = status?.fsmId
+            Text(
+                "FSM: ${fsm ?: "?"} (${fsmName(fsm)})  ·  " +
+                        if (status?.locomotionReady == true) "walking mode OK"
+                        else "not walking mode",
+                color = if (status?.locomotionReady == true) OperatorDark else Color(0xFF9D4B00),
+                fontSize = 12.sp
+            )
+            HorizontalDivider()
+            Text("vx:  %+.2f m/s".format(status?.vx ?: 0.0), color = OperatorDark, fontSize = 13.sp)
+            Text("vy:  %+.2f m/s".format(status?.vy ?: 0.0), color = OperatorDark, fontSize = 13.sp)
+            Text("yaw: %+.2f rad/s".format(status?.yaw ?: 0.0), color = OperatorDark, fontSize = 13.sp)
+            status?.lastError?.takeIf { it.isNotBlank() }?.let {
+                Text("Error: $it", color = StopRed, fontSize = 11.sp)
+            }
+        }
+    }
+}
+
+private fun fsmName(fsm: Int?): String = when (fsm) {
+    null -> "unknown"
+    0 -> "Zero torque"
+    1 -> "Damp"
+    4 -> "Stand up"
+    500 -> "Walking"
+    else -> "other"
+}
+
+private fun modeTitle(mode: String): String = when (mode) {
+    "damp" -> "Damp"
+    "stand_up" -> "Stand up"
+    "walk" -> "Walking mode"
+    else -> mode
+}
+
+private fun modeWarning(mode: String): String = when (mode) {
+    "damp" -> "The robot goes soft and can sink down. " +
+            "Only do this when the robot is in the harness or sitting/lying safely."
+    "stand_up" -> "The robot will stand up (FSM 4). " +
+            "Is the robot in the harness and is nobody next to it?"
+    "walk" -> "The robot switches to walking mode (FSM 500) and will balance " +
+            "by itself. Is the robot in the harness and is the area clear?"
+    else -> ""
+}
+
+@Composable
+private fun RobotModeCard(
+    status: TeleopStatus?,
+    enabled: Boolean,
+    busy: Boolean,
+    onRequest: (String) -> Unit
+) {
+    val fsm = status?.fsmId
+    val estop = status?.estop == true
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        shape = RoundedCornerShape(14.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Robot mode",
+                    fontWeight = FontWeight.Bold,
+                    color = OperatorDark,
+                    fontSize = 16.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    if (busy) "Changing…" else "Now: FSM ${fsm ?: "?"} (${fsmName(fsm)})",
+                    color = OperatorMuted,
+                    fontSize = 12.sp
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                // Damp is always allowed (safety).
+                OutlinedButton(
+                    onClick = { onRequest("damp") },
+                    enabled = enabled && fsm != 1,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = StopRed)
+                ) { Text("1 · Damp") }
+
+                Button(
+                    onClick = { onRequest("stand_up") },
+                    enabled = enabled && !estop && fsm == 1,
+                    modifier = Modifier.weight(1f)
+                ) { Text("2 · Stand up") }
+
+                Button(
+                    onClick = { onRequest("walk") },
+                    enabled = enabled && !estop && fsm == 4,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = OperatorGreen)
+                ) { Text("3 · Walking mode") }
+            }
+            Text(
+                "Order: Damp → Stand up → Walking mode. Zero torque is only " +
+                        "available on the Unitree remote (the robot would fall).",
+                color = OperatorMuted,
+                fontSize = 11.sp
+            )
+        }
     }
 }

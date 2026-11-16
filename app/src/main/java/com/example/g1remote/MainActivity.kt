@@ -100,7 +100,9 @@ private enum class Screen {
     SAFETY_PRESENTATION,
     VISITOR_WELCOME,
     OPERATOR,
-    VOICE
+    VOICE,
+    ENTERTAINMENT,
+    GUIDE
 }
 
 // NEW: Language selection
@@ -294,6 +296,8 @@ private fun G1RemoteApp() {
     }
 
     var screen by remember { mutableStateOf(Screen.HOME) }
+    // Title of the destination the real G1 guide is walking to.
+    var guideRouteTitle by remember { mutableStateOf("") }
 
     // Read-only workflow observation. On launch, ignore the previous execution
     // so an old completed workflow cannot hijack the visitor display.
@@ -313,8 +317,11 @@ private fun G1RemoteApp() {
                 } else if (id != null && id != observedGuidanceSessionId) {
                     observedGuidanceSessionId = id
                     // Welcome and safety must take priority over auto-navigation.
+                    // Never pull the operator away from the joystick.
                     if (screen != Screen.SAFETY_PRESENTATION &&
-                        screen != Screen.VISITOR_WELCOME) {
+                        screen != Screen.VISITOR_WELCOME &&
+                        screen != Screen.OPERATOR &&
+                        screen != Screen.GUIDE) {
                         autoGuidanceSessionId = id
                         guidanceFinishedAt = null
                         screen = Screen.NAVIGATION
@@ -368,7 +375,10 @@ private fun G1RemoteApp() {
                     welcomeError = null
                     // Show the welcome screen for this newly detected visitor.
                     welcomeScreenSessionId = id
-                    screen = Screen.VISITOR_WELCOME
+                    // Never pull the operator away from the joystick.
+                    if (screen != Screen.OPERATOR && screen != Screen.GUIDE) {
+                        screen = Screen.VISITOR_WELCOME
+                    }
                 }
                 // Allow a future session after the operator resets the backend.
                 if (id == null && status.state in setOf("idle", "waiting_for_visitor")) {
@@ -453,7 +463,9 @@ private fun G1RemoteApp() {
                     language = it
                 },
                 onHome = home,
-                onOperator = home // Visitor tablet must never open operator controls.
+                // Hidden entry: long-press the HFU logo. The joystick screen
+                // itself requires the operator PIN, checked on the robot server.
+                onOperator = { screen = Screen.OPERATOR }
             )
         }
 
@@ -587,8 +599,13 @@ private fun G1RemoteApp() {
                 // NEW: Talk to G1
                 Screen.VOICE -> TalkToG1Screen(
                     language = language,
+                    onLanguageChange = { language = it },
                     onBack = back,
                     onStartSafety = { screen = Screen.SAFETY_PRESENTATION },
+                    onRealGuideStarted = { title ->
+                        guideRouteTitle = title
+                        screen = Screen.GUIDE
+                    },
                     onGuidanceStarted = { guidanceSessionId ->
                         observedGuidanceSessionId = guidanceSessionId
                         autoGuidanceSessionId = guidanceSessionId
@@ -599,8 +616,24 @@ private fun G1RemoteApp() {
                     onSessionIdChange = { visitorSessionId = it }
                 )
 
-                // No operator controls are reachable from the visitor tablet.
-                Screen.OPERATOR -> HomeScreen(language = language, onNavigate = { screen = it })
+                // Real autonomous guide (teach & repeat on the robot).
+                Screen.GUIDE -> GuideScreen(
+                    isGerman = language == AppLanguage.DE,
+                    routeTitle = guideRouteTitle,
+                    onDone = { screen = Screen.HOME }
+                )
+
+                // Visitor gestures (works when the operator enabled demo mode).
+                Screen.ENTERTAINMENT -> RobotShowScreen(
+                    isGerman = language == AppLanguage.DE,
+                    onBack = back
+                )
+
+                // Operator joystick (PIN-protected on the robot server).
+                Screen.OPERATOR -> OperatorJoystickScreen(
+                    onBack = home,
+                    onHome = home
+                )
             }
         }
     }
@@ -719,7 +752,11 @@ private fun RemoteHeader(
             contentDescription = "HFU",
             modifier = Modifier
                 .width(135.dp)
-                .height(48.dp),
+                .height(48.dp)
+                // Hidden operator entry (not visible to visitors).
+                .pointerInput(Unit) {
+                    detectTapGestures(onLongPress = { onOperator() })
+                },
             contentScale = ContentScale.Fit
         )
 
@@ -900,6 +937,16 @@ private fun HomeScreen(
             ),
             R.drawable.robot2,
             Screen.SAFETY_PRESENTATION
+        ),
+
+        HomeTile(
+            tr(
+                language,
+                "Robot Show",
+                "Roboter-Show"
+            ),
+            R.drawable.robot,
+            Screen.ENTERTAINMENT
         )
     )
 
@@ -2762,8 +2809,10 @@ private fun HoldJoystickButton(
 @Composable
 private fun TalkToG1Screen(
     language: AppLanguage,
+    onLanguageChange: (AppLanguage) -> Unit,
     onBack: () -> Unit,
     onStartSafety: () -> Unit,
+    onRealGuideStarted: (String) -> Unit,
     onGuidanceStarted: (String) -> Unit,
     sessionId: String?,
     onSessionIdChange: (String?) -> Unit
@@ -2771,9 +2820,24 @@ private fun TalkToG1Screen(
     val context = LocalContext.current
     var message by remember { mutableStateOf("") }
     var listening by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("Ready to listen") }
-    var messages by remember {
-        mutableStateOf(listOf("G1" to "Hello! I'm G1. How can I help you?"))
+    val german = language == AppLanguage.DE
+    fun t(en: String, de: String) = if (german) de else en
+    fun greeting() = t("Hello! I'm G1. How can I help you?",
+        "Hallo! Ich bin G1. Wie kann ich Ihnen helfen?")
+    var status by remember { mutableStateOf("") }
+    var messages by remember { mutableStateOf(listOf("G1" to greeting())) }
+    // Destinations taught on the robot (teach & repeat guide service).
+    var guideRoutes by remember { mutableStateOf<List<GuideRoute>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        runCatching { guideRoutes = G1GuideApi.routes() }
+    }
+
+    // Switching language before the visitor said anything: greet again.
+    LaunchedEffect(language) {
+        if (messages.size == 1 && messages.first().first == "G1") {
+            messages = listOf("G1" to greeting())
+        }
+        status = ""
     }
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
     var requesting by remember { mutableStateOf(false) }
@@ -2792,24 +2856,75 @@ private fun TalkToG1Screen(
                 "sicherheit", "sicherheitsunterweisung", "sicherheitsregeln",
                 "laborregeln", "sicherheitsanweisungen"
             ).any { normalized.contains(it) }) {
-            status = "Opening G1 safety presentation"
+            status = t("Opening the safety presentation", "Sicherheitspräsentation wird geöffnet")
             onStartSafety()
+            return
+        }
+        // Voice gesture, e.g. "G1, shake my hand" / "Gib mir die Hand".
+        val voiceGesture = detectVoiceGesture(spoken)
+        if (voiceGesture != null) {
+            requesting = true
+            status = if (german) "G1 bewegt die Arme..." else "G1 is moving its arms..."
+            scope.launch {
+                try {
+                    val error = G1DemoApi.voiceGesture(voiceGesture)
+                    if (error == null) {
+                        messages = messages + ("G1" to voiceGestureReply(voiceGesture, german))
+                        status = if (german) "Geste läuft" else "Gesture running"
+                    } else {
+                        messages = messages + ("G1" to
+                                (if (german) "Das geht gerade nicht: " else "I can't do that right now: ") +
+                                error)
+                        status = if (german) "Geste nicht möglich" else "Gesture not possible"
+                    }
+                } finally {
+                    requesting = false
+                }
+            }
+            return
+        }
+        // "Guide me to the coffee machine" -> real robot guide (taught routes).
+        val guideRoute = detectGuideRequest(spoken, guideRoutes)
+        if (guideRoute != null) {
+            requesting = true
+            val title = guideRoute.title(german)
+            status = t("Starting the guide…", "Führung startet…")
+            scope.launch {
+                try {
+                    val error = G1GuideApi.start(guideRoute.name, german)
+                    if (error == null) {
+                        // G1 announces "Please follow me" itself on the robot speaker.
+                        messages = messages + ("G1" to t(
+                            "Sure! Please follow me to the $title.",
+                            "Gerne! Bitte folgen Sie mir: $title."))
+                        status = t("Guide started", "Führung gestartet")
+                        onRealGuideStarted(title)
+                    } else {
+                        messages = messages + ("G1" to t(
+                            "Sorry, I can't guide you right now: $error",
+                            "Entschuldigung, ich kann Sie gerade nicht führen: $error"))
+                        status = t("Guide not possible", "Führung nicht möglich")
+                    }
+                } finally {
+                    requesting = false
+                }
+            }
             return
         }
         if (isCoffeeGuidanceRequest(normalized)) {
             requesting = true
-            status = "Starting coffee-machine guidance..."
+            status = t("Starting guidance to the coffee machine…", "Führung zur Kaffeemaschine startet…")
             scope.launch {
                 try {
                     val guidanceSessionId = withContext(Dispatchers.IO) {
                         startCoffeeGuidance()
                     }
                     messages = messages + ("G1" to
-                            "Coffee-machine guidance started. Opening navigation display.")
-                    status = "Guidance started"
+                            t("Okay! I will guide you to the coffee machine.", "Gerne! Ich führe Sie zur Kaffeemaschine."))
+                    status = t("Guidance started", "Führung gestartet")
                     onGuidanceStarted(guidanceSessionId)
                 } catch (error: Exception) {
-                    status = "Could not start guidance"
+                    status = t("Could not start guidance", "Führung konnte nicht starten")
                     messages = messages + ("System" to
                             "Guidance unavailable: ${error.message}")
                 } finally {
@@ -2819,18 +2934,18 @@ private fun TalkToG1Screen(
             return
         }
         requesting = true
-        status = "G1 is thinking..."
+        status = t("G1 is thinking…", "G1 denkt nach…")
         scope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    askG1Backend(spoken, sessionId)
+                    askG1Backend(spoken, sessionId, if (german) "de" else "en")
                 }
                 onSessionIdChange(result.sessionId)
                 messages = messages + ("G1" to result.answer)
-                status = if (result.speechAccepted) "G1 speech sent to robot" else
-                    "Answer received; robot speech unavailable"
+                status = if (result.speechAccepted) t("G1 is speaking", "G1 spricht") else
+                    t("Answer shown – robot speaker not available", "Antwort angezeigt – Roboter-Lautsprecher nicht verfügbar")
             } catch (error: Exception) {
-                status = "AI request failed"
+                status = t("G1 could not answer", "G1 konnte nicht antworten")
                 messages = messages + ("System" to
                         "Could not contact G1 Studio: ${error.message}")
             } finally {
@@ -2842,7 +2957,7 @@ private fun TalkToG1Screen(
     fun startNewConversation() {
         if (requesting || listening) return
         requesting = true
-        status = "Starting a new conversation..."
+        status = t("Starting a new conversation…", "Neues Gespräch wird gestartet…")
         scope.launch {
             try {
                 val previousSession = sessionId
@@ -2850,11 +2965,11 @@ private fun TalkToG1Screen(
                     withContext(Dispatchers.IO) { resetG1Backend(previousSession) }
                 }
                 onSessionIdChange(null)
-                messages = listOf("G1" to "Hello! I'm G1. How can I help you?")
+                messages = listOf("G1" to greeting())
                 message = ""
-                status = "New conversation ready"
+                status = t("New conversation ready", "Neues Gespräch bereit")
             } catch (error: Exception) {
-                status = "Could not reset conversation"
+                status = t("Could not reset the conversation", "Gespräch konnte nicht zurückgesetzt werden")
                 messages = messages + ("System" to
                         "Session reset failed: ${error.message}")
             } finally {
@@ -2876,24 +2991,24 @@ private fun TalkToG1Screen(
         }
     }
 
-    DisposableEffect(context) {
+    DisposableEffect(context, language) {
         var speechRecognizerForCleanup: SpeechRecognizer? = null
         if (SpeechRecognizer.isRecognitionAvailable(context)) {
             val speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
             speechRecognizer.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
                     listening = true
-                    status = "Listening... speak now"
+                    status = t("Listening – speak now", "Ich höre – bitte sprechen")
                 }
-                override fun onBeginningOfSpeech() { status = "Hearing your voice..." }
+                override fun onBeginningOfSpeech() { status = t("Hearing your voice…", "Ich höre Ihre Stimme…") }
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() { status = "Processing speech..." }
+                override fun onEndOfSpeech() { status = t("Understanding…", "Verstehe…") }
                 override fun onError(error: Int) {
                     listening = false
                     status = when (error) {
-                        SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized. Try again."
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech detected. Try again."
+                        SpeechRecognizer.ERROR_NO_MATCH -> t("I didn't catch that. Please try again.", "Das habe ich nicht verstanden. Bitte noch einmal.")
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> t("I didn't hear anything. Please try again.", "Ich habe nichts gehört. Bitte noch einmal.")
                         SpeechRecognizer.ERROR_NETWORK,
                         SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Speech service network error"
                         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission required"
@@ -2905,9 +3020,9 @@ private fun TalkToG1Screen(
                     val recognized = results?.getStringArrayList(
                         SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
                     if (!recognized.isNullOrBlank()) {
-                        status = "Speech recognized"
+                        status = t("Got it!", "Verstanden!")
                         latestShowVisitorText(recognized)
-                    } else status = "No words recognized"
+                    } else status = t("I didn't catch that.", "Das habe ich nicht verstanden.")
                 }
                 override fun onPartialResults(partialResults: Bundle?) {}
                 override fun onEvent(eventType: Int, params: Bundle?) {}
@@ -2929,11 +3044,11 @@ private fun TalkToG1Screen(
         if (granted) {
             try {
                 recognizer?.startListening(speechIntent)
-                status = "Starting microphone..."
+                status = t("Starting microphone…", "Mikrofon startet…")
             } catch (e: Exception) {
                 status = "Could not start recognition: ${e.message}"
             }
-        } else status = "Microphone permission denied"
+        } else status = t("Microphone permission denied", "Mikrofon-Berechtigung verweigert")
     }
 
     fun startListening() {
@@ -2946,116 +3061,45 @@ private fun TalkToG1Screen(
             ) == PackageManager.PERMISSION_GRANTED) {
             try {
                 recognizer?.startListening(speechIntent)
-                status = "Starting microphone..."
+                status = t("Starting microphone…", "Mikrofon startet…")
             } catch (e: Exception) {
                 status = "Could not start recognition: ${e.message}"
             }
         } else permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        ScreenTitle(tr(language, "Talk to G1", "Mit G1 sprechen"), onBack)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Card(
-                modifier = Modifier.weight(0.9f),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(
-                    modifier = Modifier.fillMaxWidth().padding(18.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Icon(Icons.Default.Mic, null, tint = Green, modifier = Modifier.size(55.dp))
-                    Text(tr(language, "G1 Voice Assistant", "G1 Sprachassistent"),
-                        color = Dark, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                    Text(status, color = Green, fontSize = 12.sp)
-                    Button(
-                        onClick = {
-                            if (listening) {
-                                recognizer?.stopListening()
-                                listening = false
-                                status = "Processing speech..."
-                            } else startListening()
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !requesting
-                    ) {
-                        Icon(if (listening) Icons.Default.Stop else Icons.Default.Mic, null)
-                        Spacer(Modifier.width(8.dp))
-                        Text(if (listening) "Stop Listening" else "Start Listening")
-                    }
-                    Text("Speak to your tablet. Recognized speech appears in the conversation.",
-                        color = Muted, fontSize = 12.sp)
-                }
+    TalkToG1Content(
+        isGerman = german,
+        onLanguageChange = { toGerman ->
+            if (listening) {
+                recognizer?.cancel()
+                listening = false
             }
-            Card(
-                modifier = Modifier.weight(1.4f),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(
-                    modifier = Modifier.fillMaxWidth().padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(tr(language, "Conversation", "Unterhaltung"),
-                            modifier = Modifier.weight(1f),
-                            color = Dark, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        OutlinedButton(
-                            onClick = { startNewConversation() },
-                            enabled = !requesting && !listening
-                        ) {
-                            Icon(Icons.Default.Refresh, contentDescription = null,
-                                modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(5.dp))
-                            Text(tr(language, "New Conversation", "Neues Gespräch"),
-                                fontSize = 11.sp)
-                        }
-                    }
-                    Column(
-                        modifier = Modifier.fillMaxWidth().height(180.dp)
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        messages.forEach { (speaker, content) ->
-                            Surface(
-                                color = if (speaker == "G1") Mint else Background,
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
-                                    Text(speaker, color = Green,
-                                        fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                                    Text(content, color = Dark, fontSize = 12.sp)
-                                }
-                            }
-                        }
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = message,
-                            onValueChange = { message = it },
-                            label = { Text(tr(language, "Type a message", "Nachricht eingeben")) },
-                            modifier = Modifier.weight(1f),
-                            singleLine = true
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Button(onClick = { showVisitorText(message) }, enabled = message.isNotBlank() && !requesting) {
-                            Icon(Icons.Default.Send, contentDescription = "Send")
-                        }
-                    }
-                }
-            }
+            onLanguageChange(if (toGerman) AppLanguage.DE else AppLanguage.EN)
+        },
+        onBack = onBack,
+        messages = messages,
+        status = status,
+        listening = listening,
+        thinking = requesting,
+        inputText = message,
+        onInputChange = { message = it },
+        onSend = { showVisitorText(message) },
+        onMicClick = {
+            if (listening) {
+                recognizer?.stopListening()
+                listening = false
+                status = t("Understanding…", "Verstehe…")
+            } else startListening()
+        },
+        onNewConversation = { startNewConversation() },
+        onSuggestion = { showVisitorText(it) },
+        extraSuggestions = guideRoutes.take(2).map { r ->
+            t("Take me to the ${r.title(false)}", "Bring mich zu: ${r.title(true)}")
         }
-        Notice("G1 Studio AI connected through /api/interaction/ask. Replies are sent to the physical G1 speaker when available. Safety presentation remains a separate preview.")
-    }
+    )
 }
+
 
 // Recognize explicit coffee-machine guidance requests only.
 // General questions about coffee still go to the AI conversation endpoint.
@@ -3112,7 +3156,7 @@ private data class G1AskResult(
     val sessionId: String
 )
 
-private fun askG1Backend(question: String, sessionId: String?): G1AskResult {
+private fun askG1Backend(question: String, sessionId: String?, language: String): G1AskResult {
     val connection = (URL("http://10.150.68.160:8000/api/interaction/ask")
         .openConnection() as HttpURLConnection)
     try {
@@ -3122,6 +3166,7 @@ private fun askG1Backend(question: String, sessionId: String?): G1AskResult {
         connection.doOutput = true
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
         val payload = JSONObject().put("question", question).put("speak", true)
+            .put("language", language)
         if (!sessionId.isNullOrBlank()) payload.put("session_id", sessionId)
         connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
         val code = connection.responseCode

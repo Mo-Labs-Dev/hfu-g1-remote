@@ -53,4 +53,6 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation("androidx.compose.material:material-icons-extended:1.7.8")
+    // WebSocket client for the operator joystick
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
