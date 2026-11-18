@@ -255,6 +255,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        G1Host.init(applicationContext)
 
         requestedOrientation =
             ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
@@ -1172,7 +1173,7 @@ private fun HomeScreen(
 // HOME CAMERA PREVIEW — READ-ONLY G1 SDK2 SNAPSHOTS
 // ======================================================
 
-private const val G1_CAMERA_SNAPSHOT_URL = "http://10.150.68.160:8770/snapshot"
+private val G1_CAMERA_SNAPSHOT_URL: String get() = G1Host.url(8770) + "/snapshot"
 
 @Composable
 private fun HomeCameraPreview(language: AppLanguage) {
@@ -1284,7 +1285,7 @@ private fun HomeCameraPreview(language: AppLanguage) {
 // SAFETY PRESENTATION
 // ======================================================
 
-private const val SAFETY_API = "http://10.150.68.160:8000/api/visitor-safety"
+private val SAFETY_API: String get() = G1Host.url(8000) + "/api/visitor-safety"
 
 private data class ApiSafetySlide(
     val id: String,
@@ -2894,7 +2895,10 @@ private fun TalkToG1Screen(
                     val error = G1GuideApi.start(guideRoute.name, german)
                     if (error == null) {
                         // G1 announces "Please follow me" itself on the robot speaker.
-                        messages = messages + ("G1" to t(
+                        messages = messages + ("G1" to if (guideRoute.isTour) t(
+                            "Great! Let's start the $title. Please follow me.",
+                            "Sehr gerne! Wir starten die $title. Bitte folgen Sie mir.")
+                        else t(
                             "Sure! Please follow me to the $title.",
                             "Gerne! Bitte folgen Sie mir: $title."))
                         status = t("Guide started", "Führung gestartet")
@@ -3094,7 +3098,9 @@ private fun TalkToG1Screen(
         },
         onNewConversation = { startNewConversation() },
         onSuggestion = { showVisitorText(it) },
-        extraSuggestions = guideRoutes.take(2).map { r ->
+        extraSuggestions = guideRoutes.filter { it.isTour }.take(1).map {
+            t("Give me a lab tour", "Zeig mir das Labor")
+        } + guideRoutes.filter { !it.isTour }.take(2).map { r ->
             t("Take me to the ${r.title(false)}", "Bring mich zu: ${r.title(true)}")
         }
     )
@@ -3118,7 +3124,7 @@ private fun isCoffeeGuidanceRequest(text: String): Boolean {
 // Visitor intent starts the existing simulation-only Task Engine workflow.
 // The backend validates destination, robot mode, and permitted actions.
 private fun startCoffeeGuidance(): String {
-    val connection = (URL("http://10.150.68.160:8000/api/visitor-guidance/start")
+    val connection = (URL(G1Host.url(8000) + "/api/visitor-guidance/start")
         .openConnection() as HttpURLConnection)
     try {
         connection.requestMethod = "POST"
@@ -3157,7 +3163,7 @@ private data class G1AskResult(
 )
 
 private fun askG1Backend(question: String, sessionId: String?, language: String): G1AskResult {
-    val connection = (URL("http://10.150.68.160:8000/api/interaction/ask")
+    val connection = (URL(G1Host.url(8000) + "/api/interaction/ask")
         .openConnection() as HttpURLConnection)
     try {
         connection.requestMethod = "POST"
@@ -3186,7 +3192,7 @@ private fun askG1Backend(question: String, sessionId: String?, language: String)
 
 // Resets only the visitor's conversational context, never robot motion.
 private fun resetG1Backend(sessionId: String) {
-    val connection = (URL("http://10.150.68.160:8000/api/interaction/reset")
+    val connection = (URL(G1Host.url(8000) + "/api/interaction/reset")
         .openConnection() as HttpURLConnection)
     try {
         connection.requestMethod = "POST"

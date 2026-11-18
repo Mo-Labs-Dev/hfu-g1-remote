@@ -63,18 +63,25 @@ fun GuideScreen(
     }
 
     val s = status
+    val tour = s?.isTour == true
+    val stopName = s?.stopTitle.orEmpty()
     val (headline, color) = when (s?.state) {
         null, "idle", "starting" -> t("Getting ready…", "Einen Moment…") to GMuted
-        "guiding" -> t("Please follow me to the $routeTitle", "Bitte folgen Sie mir: $routeTitle") to GGreen
+        "guiding" -> if (tour) {
+            if (stopName.isNotBlank()) t("Please follow me – next: $stopName", "Bitte folgen Sie mir – als Nächstes: $stopName") to GGreen
+            else t("Please follow me – almost done", "Bitte folgen Sie mir – gleich geschafft") to GGreen
+        } else t("Please follow me to the $routeTitle", "Bitte folgen Sie mir: $routeTitle") to GGreen
+        "explaining" -> stopName.ifBlank { t("Look here!", "Schauen Sie hier!") } to GGreen
         "blocked" -> t("Please wait – something is in my way", "Bitte warten – etwas ist im Weg") to GAmber
         "arrived" -> t("Here is the $routeTitle!", "Wir sind da: $routeTitle!") to GGreen
         "returning" -> t("I'm going back to my place", "Ich gehe zurück an meinen Platz") to GGreen
-        "done" -> t("Thank you for visiting!", "Danke für Ihren Besuch!") to GGreen
+        "done" -> if (tour) t("That was our lab tour – thank you!", "Das war unsere Laborführung – danke!") to GGreen
+                  else t("Thank you for visiting!", "Danke für Ihren Besuch!") to GGreen
         "cancelled" -> t("Guide stopped", "Führung gestoppt") to GAmber
         "aborted" -> t("I had to stop", "Ich musste anhalten") to GRed
         else -> (s?.state ?: "") to GMuted
     }
-    val active = s?.state in setOf("starting", "guiding", "blocked", "arrived", "returning")
+    val active = s?.state in setOf("starting", "guiding", "explaining", "blocked", "arrived", "returning")
 
     Column(
         modifier = Modifier
@@ -91,7 +98,8 @@ fun GuideScreen(
                 Text(t("Home", "Start"))
             }
             Spacer(Modifier.weight(1f))
-            Text(t("G1 Guide", "G1 Führung"), color = GMuted, fontSize = 14.sp)
+            Text(if (tour) t("G1 Lab Tour", "G1 Laborführung") else t("G1 Guide", "G1 Führung"),
+                color = GMuted, fontSize = 14.sp)
         }
 
         Spacer(Modifier.height(10.dp))
@@ -106,6 +114,7 @@ fun GuideScreen(
                 when (s?.state) {
                     "blocked" -> "✋"
                     "arrived", "done" -> "📍"
+                    "explaining" -> "🗣"
                     "aborted", "cancelled" -> "⏹"
                     else -> "🚶"
                 },
@@ -116,7 +125,12 @@ fun GuideScreen(
             textAlign = TextAlign.Center)
 
         val progress = (s?.progress ?: 0.0).toFloat().coerceIn(0f, 1f)
-        val legText = if (s?.leg == "back") t("Way back", "Rückweg") else t("Way there", "Hinweg")
+        val legText = when {
+            s?.leg == "back" -> t("Way back", "Rückweg")
+            tour && (s?.stopCount ?: 0) > 0 ->
+                t("Stop ${s?.stopIndex} of ${s?.stopCount}", "Station ${s?.stopIndex} von ${s?.stopCount}")
+            else -> t("Way there", "Hinweg")
+        }
         if (active) {
             LinearProgressIndicator(
                 progress = { progress },
@@ -134,6 +148,8 @@ fun GuideScreen(
             offline -> t("Guide service not reachable", "Führungsdienst nicht erreichbar")
             s?.state == "aborted" -> s?.message ?: ""
             s?.state == "blocked" -> s?.message ?: ""
+            s?.state == "explaining" -> t("G1 is explaining – feel free to look around.",
+                                          "G1 erklärt gerade – schauen Sie sich gerne um.")
             else -> ""
         }
         if (detail.isNotBlank()) {

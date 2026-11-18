@@ -10,8 +10,8 @@ import java.net.URL
 
 object G1Backend {
 
-    private const val BASE_URL =
-        "http://10.150.68.160:8000"
+    private val BASE_URL: String
+        get() = G1Host.url(8000)
 
     data class ConnectionStatus(
         val connected: Boolean,
