@@ -26,12 +26,23 @@ data class GuideRoute(
     val lengthM: Double,
     /** "route" = one destination, "tour" = lab tour with several stops */
     val kind: String = "route",
-    val stopCount: Int = 0
+    val stopCount: Int = 0,
+    val stopTitlesEn: List<String> = emptyList(),
+    val stopTitlesDe: List<String> = emptyList()
 ) {
     val isTour: Boolean get() = kind == "tour"
 
     fun title(german: Boolean): String =
         (if (german) titleDe else titleEn).ifBlank { name.replace('_', ' ') }
+
+    fun stopTitles(german: Boolean): List<String> = if (german) stopTitlesDe else stopTitlesEn
+
+    /** Rough walking time incl. explanations (G1 walks ~0.22 m/s). */
+    fun estimatedMinutes(returnHome: Boolean = true): Int {
+        val walk = lengthM / 0.22 * (if (isTour || !returnHome) 1.0 else 2.0)
+        val talk = stopCount * 35.0 + 20.0
+        return maxOf(1, ((walk + talk) / 60.0).toInt() + 1)
+    }
 }
 
 data class GuideStatus(
@@ -68,7 +79,19 @@ object G1GuideApi {
                     titleDe = o.optString("title_de"),
                     lengthM = o.optDouble("length_m", 0.0),
                     kind = o.optString("kind", "route"),
-                    stopCount = o.optJSONArray("stops")?.length() ?: 0
+                    stopCount = o.optJSONArray("stops")?.length() ?: 0,
+                    stopTitlesEn = o.optJSONArray("stops")?.let { a ->
+                        (0 until a.length()).map { k ->
+                            val st = a.getJSONObject(k)
+                            st.optString("title_en").ifBlank { st.optString("name").replace('_', ' ') }
+                        }
+                    } ?: emptyList(),
+                    stopTitlesDe = o.optJSONArray("stops")?.let { a ->
+                        (0 until a.length()).map { k ->
+                            val st = a.getJSONObject(k)
+                            st.optString("title_de").ifBlank { st.optString("title_en").ifBlank { st.optString("name").replace('_', ' ') } }
+                        }
+                    } ?: emptyList()
                 )
             }
         }

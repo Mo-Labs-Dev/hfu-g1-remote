@@ -33,7 +33,7 @@ private val GAmber = Color(0xFF9D4B00)
 fun GuideScreen(
     isGerman: Boolean,
     routeTitle: String,
-    onDone: () -> Unit
+    onDone: (finalState: String) -> Unit
 ) {
     fun t(en: String, de: String) = if (isGerman) de else en
 
@@ -53,8 +53,10 @@ fun GuideScreen(
             val s = status?.state
             if (s in setOf("done", "cancelled", "aborted")) {
                 if (finishedAt == null) finishedAt = System.currentTimeMillis()
-                if (System.currentTimeMillis() - finishedAt!! > 15_000) {
-                    onDone()
+                // finished tour -> feedback after 6 s; cancelled/aborted -> home after 15 s
+                val wait = if (s == "done") 6_000 else 15_000
+                if (System.currentTimeMillis() - finishedAt!! > wait) {
+                    onDone(s ?: "")
                     return@LaunchedEffect
                 }
             } else finishedAt = null
@@ -92,7 +94,7 @@ fun GuideScreen(
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedButton(onClick = onDone, shape = RoundedCornerShape(50)) {
+            OutlinedButton(onClick = { onDone("home") }, shape = RoundedCornerShape(50)) {
                 Icon(Icons.Default.ArrowBack, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text(t("Home", "Start"))
@@ -178,7 +180,7 @@ fun GuideScreen(
             }
         } else {
             Button(
-                onClick = onDone,
+                onClick = { onDone(s?.state ?: "") },
                 modifier = Modifier
                     .fillMaxWidth(0.5f)
                     .height(64.dp),

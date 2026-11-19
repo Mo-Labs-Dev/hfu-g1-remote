@@ -88,6 +88,7 @@ private const val IPSE_URL =
 // ======================================================
 
 private enum class Screen {
+    WELCOME,
     HOME,
     LAB_GUIDE,
     DESTINATION,
@@ -99,6 +100,7 @@ private enum class Screen {
     NAVIGATION,
     SAFETY_PRESENTATION,
     VISITOR_WELCOME,
+    FEEDBACK,
     OPERATOR,
     VOICE,
     ENTERTAINMENT,
@@ -299,8 +301,11 @@ private fun G1RemoteApp() {
     // Live link to G1 Studio: announcement + home tiles + route changes.
     LaunchedEffect(Unit) { G1StudioSync.start() }
     val studioConfig by G1StudioSync.config.collectAsState()
+    val g1Battery by G1StudioSync.battery.collectAsState()
 
-    var screen by remember { mutableStateOf(Screen.HOME) }
+    var screen by remember { mutableStateOf(Screen.WELCOME) }
+    var splashDone by remember { mutableStateOf(false) }
+    var feedbackContext by remember { mutableStateOf("general") }
     // Title of the destination the real G1 guide is walking to.
     var guideRouteTitle by remember { mutableStateOf("") }
 
@@ -439,15 +444,43 @@ private fun G1RemoteApp() {
             Screen.DEMO_DETAIL -> Screen.DEMONSTRATIONS
             Screen.NAVIGATION -> Screen.DESTINATION
             Screen.WEBSITE -> Screen.LAB_INFO
+            Screen.HOME -> Screen.WELCOME
             else -> Screen.HOME
         }
     }
 
     BackHandler(
-        enabled = screen != Screen.HOME
+        enabled = screen != Screen.WELCOME
     ) {
         back()
     }
+
+    // 1) Splash with the HFU logo, 2) Studio-style welcome, 3) home screen.
+    if (!splashDone) {
+        SplashScreen(onDone = { splashDone = true })
+        return
+    }
+
+    val german = language == AppLanguage.DE
+    val openFeedback: () -> Unit = {
+        feedbackContext = when (screen) {
+            Screen.VOICE -> "talk"
+            Screen.ENTERTAINMENT -> "robot_show"
+            Screen.GUIDE -> "tour"
+            Screen.LAB_GUIDE, Screen.DESTINATION, Screen.NAVIGATION -> "lab_guide"
+            Screen.DEMONSTRATIONS, Screen.DEMO_DETAIL -> "demonstrations"
+            Screen.LAB_MAP -> "lab_map"
+            Screen.LAB_INFO -> "lab_info"
+            else -> "general"
+        }
+        screen = Screen.FEEDBACK
+    }
+    // Pages that show the feedback bar at the bottom.
+    val showFeedbackBar = screen in setOf(
+        Screen.HOME, Screen.VOICE, Screen.LAB_GUIDE, Screen.DESTINATION,
+        Screen.ENTERTAINMENT, Screen.DEMONSTRATIONS, Screen.DEMO_DETAIL,
+        Screen.LAB_MAP, Screen.LAB_INFO, Screen.VISITOR_WELCOME
+    )
 
     Column(
         modifier = Modifier
@@ -458,7 +491,8 @@ private fun G1RemoteApp() {
 
         if (
             screen != Screen.WEBSITE &&
-            screen != Screen.SAFETY_PRESENTATION
+            screen != Screen.SAFETY_PRESENTATION &&
+            screen != Screen.WELCOME
         ) {
             RemoteHeader(
                 isHome = screen == Screen.HOME,
@@ -470,9 +504,12 @@ private fun G1RemoteApp() {
                 onHome = home,
                 // Hidden entry: long-press the HFU logo. The joystick screen
                 // itself requires the operator PIN, checked on the robot server.
-                onOperator = { screen = Screen.OPERATOR }
+                onOperator = { screen = Screen.OPERATOR },
+                onFeedback = openFeedback
             )
         }
+
+        BatteryAlertPopup(g1Battery, german = language == AppLanguage.DE)
 
         Box(
             modifier = Modifier
@@ -481,9 +518,25 @@ private fun G1RemoteApp() {
         ) {
             when (screen) {
 
+                Screen.WELCOME -> WelcomeScreen(
+                    german = language == AppLanguage.DE,
+                    backendOnline = backendStatus?.connected,
+                    battery = g1Battery,
+                    studioConfig = studioConfig,
+                    onLanguage = { de -> language = if (de) AppLanguage.DE else AppLanguage.EN },
+                    onStart = { screen = Screen.HOME },
+                    onTalk = { screen = Screen.VOICE },
+                    onOperator = { screen = Screen.OPERATOR },
+                    onFeedback = {
+                        feedbackContext = "general"
+                        screen = Screen.FEEDBACK
+                    }
+                )
+
                 Screen.HOME -> HomeScreen(
                     language = language,
                     studioConfig = studioConfig,
+                    battery = g1Battery,
                     visitorWelcomed = welcomeHomeVisible,
                     onNavigate = {
                         screen = it
@@ -536,14 +589,13 @@ private fun G1RemoteApp() {
                     }
                 )
 
-                Screen.LAB_GUIDE -> CatalogScreen(
-                    title = "Lab Guide",
-                    subtitle = "Where would you like to go?",
-                    items = destinations,
+                // Lab Guide = the routes / tours really taught on G1 (edited in G1 Studio).
+                Screen.LAB_GUIDE -> RealLabGuideScreen(
+                    german = language == AppLanguage.DE,
                     onBack = back,
-                    onSelect = {
-                        selectedDestination = it
-                        screen = Screen.DESTINATION
+                    onStarted = { title ->
+                        guideRouteTitle = title
+                        screen = Screen.GUIDE
                     }
                 )
 
@@ -582,8 +634,9 @@ private fun G1RemoteApp() {
                     onAction = {}
                 )
 
-                Screen.LAB_MAP -> LabMapScreen(
-                    onBack = back
+                Screen.LAB_MAP -> LabMap3DScreen(
+                    german = language == AppLanguage.DE,
+                    floorPlan = { LabMapScreen(onBack = back) }
                 )
 
                 Screen.LAB_INFO -> LabInfoScreen(
@@ -626,6 +679,19 @@ private fun G1RemoteApp() {
                 Screen.GUIDE -> GuideScreen(
                     isGerman = language == AppLanguage.DE,
                     routeTitle = guideRouteTitle,
+                    onDone = { finalState ->
+                        if (finalState == "done") {          // finished tour -> ask for feedback
+                            feedbackContext = "tour:" + guideRouteTitle.take(30)
+                            screen = Screen.FEEDBACK
+                        } else {
+                            screen = Screen.HOME
+                        }
+                    }
+                )
+
+                Screen.FEEDBACK -> FeedbackScreen(
+                    german = language == AppLanguage.DE,
+                    context = feedbackContext,
                     onDone = { screen = Screen.HOME }
                 )
 
@@ -641,6 +707,44 @@ private fun G1RemoteApp() {
                     onHome = home
                 )
             }
+        }
+
+        if (showFeedbackBar) {
+            FeedbackBottomBar(german = german, onFeedback = openFeedback)
+        }
+    }
+}
+
+// Feedback bar at the bottom of every visitor page (app colours unchanged).
+@Composable
+private fun FeedbackBottomBar(german: Boolean, onFeedback: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Mint)
+            .padding(horizontal = 24.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFD79616), modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(10.dp))
+        Text(
+            if (german) "Wie gefällt Ihnen Ihr Besuch? Ihre Meinung hilft uns."
+            else "How was your visit with G1? Your opinion helps us.",
+            color = Dark,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 15.sp,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Button(
+            onClick = onFeedback,
+            colors = ButtonDefaults.buttonColors(containerColor = Green),
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            Text(if (german) "Feedback geben" else "Give feedback", color = Color.White, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(6.dp))
+            Icon(Icons.Default.ArrowForward, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
         }
     }
 }
@@ -741,7 +845,8 @@ private fun RemoteHeader(
     backendStatus: G1Backend.ConnectionStatus?,
     onLanguageChange: (AppLanguage) -> Unit,
     onHome: () -> Unit,
-    onOperator: () -> Unit
+    onOperator: () -> Unit,
+    onFeedback: () -> Unit = {}
 ) {
 
     Row(
@@ -818,6 +923,10 @@ private fun RemoteHeader(
         }
 
         Spacer(Modifier.width(10.dp))
+        val g1Battery by G1StudioSync.battery.collectAsState()
+        BatteryChip(g1Battery)
+        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(6.dp))
 
         // NEW: Language selector
         Row(
@@ -886,6 +995,7 @@ private fun HomeScreen(
     language: AppLanguage,
     onNavigate: (Screen) -> Unit,
     studioConfig: G1StudioSync.AppConfig = G1StudioSync.AppConfig(),
+    battery: G1StudioSync.Battery = G1StudioSync.Battery(),
     visitorWelcomed: Boolean = false
 ) {
 
@@ -975,6 +1085,9 @@ private fun HomeScreen(
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+
+        // Battery warning (below 50 % / 20 %), pushed live from G1 Studio.
+        BatteryBanner(battery, german = language == AppLanguage.DE)
 
         // Announcement from G1 Studio (pushed live).
         val ann = studioConfig.announcement

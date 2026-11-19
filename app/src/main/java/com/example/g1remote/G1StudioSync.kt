@@ -47,6 +47,12 @@ object G1StudioSync {
     private val _routesVersion = MutableStateFlow(0)
     val routesVersion: StateFlow<Int> = _routesVersion
 
+    /** Robot battery as reported by G1 Studio (level: unknown / ok / low / critical). */
+    data class Battery(val soc: Double? = null, val level: String = "unknown", val charging: Boolean = false)
+
+    private val _battery = MutableStateFlow(Battery())
+    val battery: StateFlow<Battery> = _battery
+
     private val _connected = MutableStateFlow(false)
     val connected: StateFlow<Boolean> = _connected
 
@@ -64,6 +70,7 @@ object G1StudioSync {
         if (started) return
         started = true
         scope.launch {
+            var n = 0
             while (true) {
                 val host = G1Host.ip
                 if (socket == null || host != socketHost) {
@@ -72,6 +79,8 @@ object G1StudioSync {
                     connect(host)
                     refreshConfig()
                 }
+                if (n % 10 == 0) refreshBattery()          // every 30 s (pushes come instantly)
+                n++
                 delay(3000L)
             }
         }
@@ -92,6 +101,9 @@ object G1StudioSync {
                 when (type) {
                     "app_config_changed" -> scope.launch { refreshConfig() }
                     "routes_changed" -> _routesVersion.value = _routesVersion.value + 1
+                    "battery" -> runCatching {
+                        _battery.value = parseBattery(JSONObject(text).getJSONObject("data"))
+                    }
                 }
             }
 
@@ -105,6 +117,25 @@ object G1StudioSync {
         if (socket === webSocket) {
             socket = null
             _connected.value = false
+        }
+    }
+
+    private fun parseBattery(j: JSONObject) = Battery(
+        soc = if (j.isNull("soc")) null else j.optDouble("soc"),
+        level = j.optString("level", "unknown"),
+        charging = j.optBoolean("charging", false)
+    )
+
+    fun refreshBattery() {
+        runCatching {
+            val conn = URL("${G1Host.url(8000)}/api/app/battery").openConnection() as HttpURLConnection
+            conn.connectTimeout = 3000
+            conn.readTimeout = 3000
+            try {
+                _battery.value = parseBattery(JSONObject(conn.inputStream.bufferedReader().readText()))
+            } finally {
+                conn.disconnect()
+            }
         }
     }
 
