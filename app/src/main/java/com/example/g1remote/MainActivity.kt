@@ -296,6 +296,10 @@ private fun G1RemoteApp() {
         }
     }
 
+    // Live link to G1 Studio: announcement + home tiles + route changes.
+    LaunchedEffect(Unit) { G1StudioSync.start() }
+    val studioConfig by G1StudioSync.config.collectAsState()
+
     var screen by remember { mutableStateOf(Screen.HOME) }
     // Title of the destination the real G1 guide is walking to.
     var guideRouteTitle by remember { mutableStateOf("") }
@@ -479,6 +483,7 @@ private fun G1RemoteApp() {
 
                 Screen.HOME -> HomeScreen(
                     language = language,
+                    studioConfig = studioConfig,
                     visitorWelcomed = welcomeHomeVisible,
                     onNavigate = {
                         screen = it
@@ -880,6 +885,7 @@ private fun RemoteHeader(
 private fun HomeScreen(
     language: AppLanguage,
     onNavigate: (Screen) -> Unit,
+    studioConfig: G1StudioSync.AppConfig = G1StudioSync.AppConfig(),
     visitorWelcomed: Boolean = false
 ) {
 
@@ -888,6 +894,17 @@ private fun HomeScreen(
         val image: Int,
         val screen: Screen
     )
+
+    // Studio decides which tiles visitors see (Visitor App page).
+    fun tileKey(screen: Screen): String = when (screen) {
+        Screen.LAB_GUIDE -> "lab_guide"
+        Screen.DEMONSTRATIONS -> "demonstrations"
+        Screen.LAB_MAP -> "lab_map"
+        Screen.LAB_INFO -> "lab_info"
+        Screen.SAFETY_PRESENTATION -> "safety"
+        Screen.ENTERTAINMENT -> "robot_show"
+        else -> ""
+    }
 
     val cards = listOf(
         HomeTile(
@@ -949,7 +966,7 @@ private fun HomeScreen(
             R.drawable.robot,
             Screen.ENTERTAINMENT
         )
-    )
+    ).filter { studioConfig.tileVisible(tileKey(it.screen)) }
 
     Column(
         modifier = Modifier
@@ -958,6 +975,35 @@ private fun HomeScreen(
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+
+        // Announcement from G1 Studio (pushed live).
+        val ann = studioConfig.announcement
+        val annText = if (language == AppLanguage.DE) ann.textDe.ifBlank { ann.textEn } else ann.textEn.ifBlank { ann.textDe }
+        if (ann.active && annText.isNotBlank()) {
+            val warning = ann.level == "warning"
+            Surface(
+                color = if (warning) Color(0xFFFFF6E5) else Mint,
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        if (warning) Icons.Default.Warning else Icons.Default.Info,
+                        contentDescription = null,
+                        tint = if (warning) Color(0xFFD79616) else Green
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        annText,
+                        color = if (warning) Color(0xFF7A520E) else Dark,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 15.sp
+                    )
+                }
+            }
+        }
 
         if (visitorWelcomed) {
             Surface(color = Mint, shape = RoundedCornerShape(12.dp)) {
@@ -2829,7 +2875,8 @@ private fun TalkToG1Screen(
     var messages by remember { mutableStateOf(listOf("G1" to greeting())) }
     // Destinations taught on the robot (teach & repeat guide service).
     var guideRoutes by remember { mutableStateOf<List<GuideRoute>>(emptyList()) }
-    LaunchedEffect(Unit) {
+    val routesVersion by G1StudioSync.routesVersion.collectAsState()
+    LaunchedEffect(routesVersion) {          // reloads live when a tour is edited in G1 Studio
         runCatching { guideRoutes = G1GuideApi.routes() }
     }
 
@@ -2909,6 +2956,80 @@ private fun TalkToG1Screen(
                             "Entschuldigung, ich kann Sie gerade nicht führen: $error"))
                         status = t("Guide not possible", "Führung nicht möglich")
                     }
+                } finally {
+                    requesting = false
+                }
+            }
+            return
+        }
+        // G1 Vision: "What do you see?" / "What is this?" -> camera + local vision AI.
+        if (isDescribeRequest(spoken)) {
+            requesting = true
+            status = t("G1 is looking…", "G1 schaut…")
+            scope.launch {
+                try {
+                    val answer = G1VisionApi.describe(spoken, german)
+                    messages = messages + ("G1" to answer)        // G1 also says it out loud
+                    status = t("Answered", "Beantwortet")
+                } catch (error: Exception) {
+                    messages = messages + ("G1" to t(
+                        "Sorry, I can't look right now: ${error.message}",
+                        "Entschuldigung, ich kann gerade nicht schauen: ${error.message}"))
+                    status = t("Vision not available", "Kamera-KI nicht verfügbar")
+                } finally {
+                    requesting = false
+                }
+            }
+            return
+        }
+        // G1 Vision: "Find the bottle" -> G1 turns, looks with YOLO, faces it, waves.
+        if (isFindRequest(spoken)) {
+            requesting = true
+            status = t("Checking the object…", "Gegenstand wird geprüft…")
+            scope.launch {
+                try {
+                    val label = G1VisionApi.match(spoken)
+                    if (label == null) {
+                        // Not an object G1 can detect (e.g. "Where can I find the toilet?") -> ask the AI.
+                        status = t("G1 is thinking…", "G1 denkt nach…")
+                        try {
+                            val result = withContext(Dispatchers.IO) {
+                                askG1Backend(spoken, sessionId, if (german) "de" else "en")
+                            }
+                            onSessionIdChange(result.sessionId)
+                            messages = messages + ("G1" to result.answer)
+                            status = ""
+                        } catch (error: Exception) {
+                            status = t("G1 could not answer", "G1 konnte nicht antworten")
+                            messages = messages + ("System" to "Could not contact G1 Studio: ${error.message}")
+                        }
+                        return@launch
+                    }
+                    val error = G1VisionApi.find(label, german)
+                    if (error != null) {
+                        messages = messages + ("G1" to t(
+                            "I can't search right now: $error", "Ich kann gerade nicht suchen: $error"))
+                        status = t("Search not possible", "Suche nicht möglich")
+                        return@launch
+                    }
+                    messages = messages + ("G1" to t("Okay, let me look around…", "Okay, ich schaue mich um…"))
+                    status = t("G1 is searching…", "G1 sucht…")
+                    var final: G1VisionApi.Status? = null
+                    for (i in 0 until 180) {
+                        delay(1000L)
+                        val st = G1VisionApi.status() ?: continue
+                        if (st.task == "find" && st.state in setOf("found", "not_found", "cancelled", "error")) {
+                            final = st
+                            break
+                        }
+                    }
+                    messages = messages + ("G1" to when (final?.state) {
+                        "found", "not_found" -> final.answer.ifBlank { final.message }
+                        "cancelled" -> t("Search stopped.", "Suche abgebrochen.")
+                        "error" -> t("I had to stop: ${final.message}", "Ich musste abbrechen: ${final.message}")
+                        else -> t("The search takes too long.", "Die Suche dauert zu lange.")
+                    })
+                    status = ""
                 } finally {
                     requesting = false
                 }
@@ -3098,7 +3219,10 @@ private fun TalkToG1Screen(
         },
         onNewConversation = { startNewConversation() },
         onSuggestion = { showVisitorText(it) },
-        extraSuggestions = guideRoutes.filter { it.isTour }.take(1).map {
+        extraSuggestions = listOf(
+            t("What do you see?", "Was siehst du?"),
+            t("Find a bottle", "Finde eine Flasche")
+        ) + guideRoutes.filter { it.isTour }.take(1).map {
             t("Give me a lab tour", "Zeig mir das Labor")
         } + guideRoutes.filter { !it.isTour }.take(2).map { r ->
             t("Take me to the ${r.title(false)}", "Bring mich zu: ${r.title(true)}")
