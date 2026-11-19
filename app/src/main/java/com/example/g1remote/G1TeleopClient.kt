@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
 object G1TeleopConfig {
     // Standalone teleop server (scripts/run_teleop_server.py).
     // Change to port 8000 once the router is mounted in the main backend.
-    const val BASE_URL = "http://10.150.68.160:8001"
+    val BASE_URL: String get() = G1Host.url(8001)
 }
 
 class TeleopException(val code: Int, message: String) : Exception(message)

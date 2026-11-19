@@ -16,17 +16,33 @@ import java.util.concurrent.TimeUnit
  * The robot server checks all safety rules; the app only asks.
  */
 object G1GuideConfig {
-    const val BASE_URL = "http://10.150.68.160:8002"
+    val BASE_URL: String get() = G1Host.url(8002)
 }
 
 data class GuideRoute(
     val name: String,
     val titleEn: String,
     val titleDe: String,
-    val lengthM: Double
+    val lengthM: Double,
+    /** "route" = one destination, "tour" = lab tour with several stops */
+    val kind: String = "route",
+    val stopCount: Int = 0,
+    val stopTitlesEn: List<String> = emptyList(),
+    val stopTitlesDe: List<String> = emptyList()
 ) {
+    val isTour: Boolean get() = kind == "tour"
+
     fun title(german: Boolean): String =
         (if (german) titleDe else titleEn).ifBlank { name.replace('_', ' ') }
+
+    fun stopTitles(german: Boolean): List<String> = if (german) stopTitlesDe else stopTitlesEn
+
+    /** Rough walking time incl. explanations (G1 walks ~0.22 m/s). */
+    fun estimatedMinutes(returnHome: Boolean = true): Int {
+        val walk = lengthM / 0.22 * (if (isTour || !returnHome) 1.0 else 2.0)
+        val talk = stopCount * 35.0 + 20.0
+        return maxOf(1, ((walk + talk) / 60.0).toInt() + 1)
+    }
 }
 
 data class GuideStatus(
@@ -34,8 +50,14 @@ data class GuideStatus(
     val route: String,
     val progress: Double,
     val message: String,
-    val leg: String
-)
+    val leg: String,
+    val kind: String = "route",
+    val stopIndex: Int = 0,
+    val stopCount: Int = 0,
+    val stopTitle: String = ""
+) {
+    val isTour: Boolean get() = kind == "tour"
+}
 
 object G1GuideApi {
     private val http = OkHttpClient.Builder()
@@ -55,7 +77,21 @@ object G1GuideApi {
                     name = o.optString("name"),
                     titleEn = o.optString("title_en"),
                     titleDe = o.optString("title_de"),
-                    lengthM = o.optDouble("length_m", 0.0)
+                    lengthM = o.optDouble("length_m", 0.0),
+                    kind = o.optString("kind", "route"),
+                    stopCount = o.optJSONArray("stops")?.length() ?: 0,
+                    stopTitlesEn = o.optJSONArray("stops")?.let { a ->
+                        (0 until a.length()).map { k ->
+                            val st = a.getJSONObject(k)
+                            st.optString("title_en").ifBlank { st.optString("name").replace('_', ' ') }
+                        }
+                    } ?: emptyList(),
+                    stopTitlesDe = o.optJSONArray("stops")?.let { a ->
+                        (0 until a.length()).map { k ->
+                            val st = a.getJSONObject(k)
+                            st.optString("title_de").ifBlank { st.optString("title_en").ifBlank { st.optString("name").replace('_', ' ') } }
+                        }
+                    } ?: emptyList()
                 )
             }
         }
@@ -105,7 +141,11 @@ object G1GuideApi {
         route = o.optString("route"),
         progress = o.optDouble("progress", 0.0),
         message = o.optString("message"),
-        leg = o.optString("leg")
+        leg = o.optString("leg"),
+        kind = o.optString("kind", "route"),
+        stopIndex = o.optInt("stop_index", 0),
+        stopCount = o.optInt("stop_count", 0),
+        stopTitle = o.optString("stop_title")
     )
 }
 
@@ -117,6 +157,9 @@ object G1GuideApi {
 fun detectGuideRequest(text: String, routes: List<GuideRoute>): GuideRoute? {
     if (routes.isEmpty()) return null
     val t = text.lowercase(Locale.ROOT)
+    // "Give me a lab tour" / "Kannst du mir das Labor zeigen?" -> the lab tour
+    val tour = routes.firstOrNull { it.isTour }
+    if (tour != null && isTourRequest(t)) return tour
     val wantsGuide = listOf(
         "guide", "take me", "bring me", "show me the way", "show me where", "lead me",
         "walk me", "way to", "directions to", "where is", "where's", "how do i get to",
@@ -133,4 +176,16 @@ fun detectGuideRequest(text: String, routes: List<GuideRoute>): GuideRoute? {
             .distinct()
     }
     return routes.firstOrNull { r -> keys(r).any { k -> t.contains(k) } }
+}
+
+/** Visitor wants the whole lab tour (not one destination). */
+fun isTourRequest(text: String): Boolean {
+    val t = text.lowercase(Locale.ROOT)
+    return listOf(
+        "tour", "show me around", "show me the lab", "show me your lab", "guide me through",
+        "walk me through", "explain the lab", "what is in this lab", "what's in this lab",
+        "rundgang", "laborführung", "laborfuehrung", "führung durch", "fuehrung durch",
+        "zeig mir das labor", "zeigst du mir das labor", "labor zeigen", "herumführen",
+        "herum führen", "durch das labor", "durchs labor"
+    ).any { t.contains(it) }
 }

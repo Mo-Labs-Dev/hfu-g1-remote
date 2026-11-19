@@ -20,6 +20,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -46,7 +47,8 @@ private const val SLOW_SCALE = 0.5f
  * Real operator joystick for the G1.
  *
  * Left stick: walk (up = forward, sideways = strafe).
- * Right stick: turn (horizontal only).
+ * Right stick: 360° like the Unitree app - sideways = turn,
+ *              up/down = forward/back, diagonal = walk and turn (car style).
  * Releasing a stick sends zero; leaving the screen stops and locks.
  * All limits and safety checks are enforced on the robot server.
  */
@@ -74,6 +76,7 @@ fun OperatorJoystickScreen(
     var walkX by remember { mutableStateOf(0f) }
     var walkY by remember { mutableStateOf(0f) }
     var turnX by remember { mutableStateOf(0f) }
+    var turnY by remember { mutableStateOf(0f) }
 
     // Robot mode change (damp / stand_up / walk) waiting for confirmation.
     var pendingMode by remember { mutableStateOf<String?>(null) }
@@ -101,7 +104,8 @@ fun OperatorJoystickScreen(
                 client.connect()
             }
             client.sendCommand(
-                x = walkY,          // stick up    -> forward
+                // forward: left stick up, or right stick up (car-style driving)
+                x = (walkY + turnY).coerceIn(-1f, 1f),
                 y = -walkX,         // stick right -> move right (robot -y)
                 yaw = -turnX,       // stick right -> turn right (robot -yaw)
                 scale = if (slowMode) SLOW_SCALE else 1f
@@ -152,6 +156,8 @@ fun OperatorJoystickScreen(
                 Icon(Icons.Default.Home, contentDescription = "Home", tint = OperatorGreen)
             }
         }
+
+        RobotAddressCard()
 
         // ---------------- Unlock / session bar ----------------
         Card(
@@ -365,13 +371,15 @@ fun OperatorJoystickScreen(
 
             StickCard(
                 title = "Turn",
-                hint = "Left / right = rotate",
+                hint = "360° · sideways = turn · up = drive",
                 modifier = Modifier.weight(1f)
             ) {
                 VirtualJoystick(
                     enabled = sticksEnabled,
-                    horizontalOnly = true,
-                    onChange = { nx, _ -> turnX = nx }
+                    onChange = { nx, ny ->
+                        turnX = nx
+                        turnY = ny
+                    }
                 )
             }
         }
@@ -603,6 +611,57 @@ private fun RobotModeCard(
                         "available on the Unitree remote (the robot would fall).",
                 color = OperatorMuted,
                 fontSize = 11.sp
+            )
+        }
+    }
+}
+
+
+/** Robot (Jetson) address - change it when the Wi-Fi changes, no rebuild needed. */
+@Composable
+private fun RobotAddressCard() {
+    val context = LocalContext.current
+    var text by remember { mutableStateOf(G1Host.ip) }
+    var saved by remember { mutableStateOf(G1Host.ip) }
+    var info by remember { mutableStateOf<String?>(null) }
+
+    fun apply(value: String) {
+        info = if (G1Host.save(context, value)) {
+            text = G1Host.ip
+            saved = G1Host.ip
+            "Saved. Go back to Home - everything now uses ${G1Host.ip}."
+        } else "Not a valid IP address (example: 10.42.0.1)"
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        shape = RoundedCornerShape(14.dp)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Robot address", fontWeight = FontWeight.Bold, color = OperatorDark)
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    modifier = Modifier.width(200.dp)
+                )
+                Button(
+                    onClick = { apply(text) },
+                    enabled = text.trim() != saved,
+                    colors = ButtonDefaults.buttonColors(containerColor = OperatorGreen)
+                ) { Text("Save") }
+                OutlinedButton(onClick = { apply(G1Host.DEFAULT_IP) }) {
+                    Text("CSA-H (${G1Host.DEFAULT_IP})")
+                }
+                OutlinedButton(onClick = { apply(G1Host.HOTSPOT_IP) }) {
+                    Text("G1-Robot Wi-Fi (${G1Host.HOTSPOT_IP})")
+                }
+            }
+            Text(
+                info ?: "Now: ${saved}  ·  On Ubuntu: ip -4 -br addr show wlP1p1s0",
+                color = OperatorMuted, fontSize = 12.sp
             )
         }
     }

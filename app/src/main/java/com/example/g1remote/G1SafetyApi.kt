@@ -10,8 +10,8 @@ import java.net.URL
 
 object G1SafetyApi {
 
-    private const val BASE_URL =
-        "http://10.150.68.160:8000/api/visitor-safety"
+    private val BASE_URL: String
+        get() = G1Host.url(8000) + "/api/visitor-safety"
 
     data class SafetySlide(
         val id: String,

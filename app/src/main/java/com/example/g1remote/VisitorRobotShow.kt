@@ -45,7 +45,7 @@ object G1DemoApi {
         .readTimeout(5, TimeUnit.SECONDS)
         .build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
-    private val baseUrl = G1TeleopConfig.BASE_URL
+    private val baseUrl: String get() = G1TeleopConfig.BASE_URL
 
     private fun parse(json: JSONObject) = DemoStatus(
         demoEnabled = json.optBoolean("demo_enabled", false),
