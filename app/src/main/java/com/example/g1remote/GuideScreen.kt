@@ -75,6 +75,7 @@ fun GuideScreen(
         } else t("Please follow me to the $routeTitle", "Bitte folgen Sie mir: $routeTitle") to GGreen
         "explaining" -> stopName.ifBlank { t("Look here!", "Schauen Sie hier!") } to GGreen
         "blocked" -> t("Please wait – something is in my way", "Bitte warten – etwas ist im Weg") to GAmber
+        "replanning" -> t("This way is blocked – I'm taking another way", "Der Weg ist versperrt – ich nehme einen anderen") to GAmber
         "arrived" -> t("Here is the $routeTitle!", "Wir sind da: $routeTitle!") to GGreen
         "returning" -> t("I'm going back to my place", "Ich gehe zurück an meinen Platz") to GGreen
         "done" -> if (tour) t("That was our lab tour – thank you!", "Das war unsere Laborführung – danke!") to GGreen
@@ -83,7 +84,7 @@ fun GuideScreen(
         "aborted" -> t("I had to stop", "Ich musste anhalten") to GRed
         else -> (s?.state ?: "") to GMuted
     }
-    val active = s?.state in setOf("starting", "guiding", "explaining", "blocked", "arrived", "returning")
+    val active = s?.state in setOf("starting", "guiding", "explaining", "blocked", "replanning", "arrived", "returning")
 
     Column(
         modifier = Modifier
@@ -115,6 +116,7 @@ fun GuideScreen(
             Text(
                 when (s?.state) {
                     "blocked" -> "✋"
+                    "replanning" -> "↪"
                     "arrived", "done" -> "📍"
                     "explaining" -> "🗣"
                     "aborted", "cancelled" -> "⏹"

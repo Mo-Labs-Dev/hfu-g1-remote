@@ -59,6 +59,11 @@ data class GuideStatus(
     val isTour: Boolean get() = kind == "tour"
 }
 
+/** Destination for autonomous walking (placed on the map in G1 Studio, no teaching needed). */
+data class MapDestination(val name: String, val titleEn: String, val titleDe: String, val x: Double, val y: Double) {
+    fun title(german: Boolean): String = (if (german) titleDe else titleEn).ifBlank { name.replace('_', ' ') }
+}
+
 object G1GuideApi {
     private val http = OkHttpClient.Builder()
         .connectTimeout(3, TimeUnit.SECONDS)
@@ -127,6 +132,43 @@ object G1GuideApi {
             "Guide service not reachable (${e.message})"
         }
     }
+
+    /** Autonomous-walking destinations from G1 Studio (empty if Studio is not reachable). */
+    suspend fun destinations(): List<MapDestination> = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder().url("${G1Host.url(8000)}/api/map/destinations").get().build()
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@runCatching emptyList()
+                val arr = JSONArray(resp.body?.string().orEmpty())
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    MapDestination(o.optString("name"), o.optString("title_en"), o.optString("title_de"),
+                        o.optDouble("x"), o.optDouble("y"))
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /** G1 plans its own way to the destination. Returns null when started, else the reason. */
+    suspend fun goto(destination: String, german: Boolean, returnHome: Boolean = true): String? =
+        withContext(Dispatchers.IO) {
+            try {
+                val body = JSONObject()
+                    .put("destination", destination)
+                    .put("lang", if (german) "de" else "en")
+                    .put("return_home", returnHome)
+                    .toString().toRequestBody(jsonType)
+                val req = Request.Builder().url("${G1Host.url(8000)}/api/map/goto").post(body).build()
+                http.newCall(req).execute().use { resp ->
+                    val text = resp.body?.string().orEmpty()
+                    if (resp.isSuccessful) null
+                    else runCatching { JSONObject(text).optString("detail") }.getOrNull()
+                        ?.takeIf { it.isNotBlank() } ?: "HTTP ${resp.code}"
+                }
+            } catch (e: Exception) {
+                "G1 Studio not reachable (${e.message})"
+            }
+        }
 
     suspend fun cancel() = withContext(Dispatchers.IO) {
         runCatching {

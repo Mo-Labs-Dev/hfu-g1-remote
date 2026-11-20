@@ -10,6 +10,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Refresh
@@ -42,6 +43,8 @@ fun RealLabGuideScreen(german: Boolean, onBack: () -> Unit, onStarted: (title: S
     var loading by remember { mutableStateOf(true) }
     var offline by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf<GuideRoute?>(null) }
+    var dests by remember { mutableStateOf<List<MapDestination>>(emptyList()) }
+    var selectedDest by remember { mutableStateOf<MapDestination?>(null) }
     var starting by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableStateOf(0) }
@@ -57,6 +60,8 @@ fun RealLabGuideScreen(german: Boolean, onBack: () -> Unit, onStarted: (title: S
                 selected = selected?.let { s -> it.find { r -> r.name == s.name } }
             }
             .onFailure { offline = true }
+        dests = G1GuideApi.destinations().sortedBy { it.title(german) }
+        selectedDest = selectedDest?.let { s -> dests.find { it.name == s.name } }
         loading = false
     }
 
@@ -68,7 +73,13 @@ fun RealLabGuideScreen(german: Boolean, onBack: () -> Unit, onStarted: (title: S
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { if (selected != null) selected = null else onBack() }) {
+            IconButton(onClick = {
+                when {
+                    selected != null -> selected = null
+                    selectedDest != null -> selectedDest = null
+                    else -> onBack()
+                }
+            }) {
                 Icon(Icons.Default.ArrowBack, contentDescription = t("Back", "Zurück"), tint = LText)
             }
             Column(Modifier.weight(1f)) {
@@ -79,7 +90,63 @@ fun RealLabGuideScreen(german: Boolean, onBack: () -> Unit, onStarted: (title: S
         }
 
         val sel = selected
+        val selD = selectedDest
         when {
+            selD != null -> {
+                // ---------------- autonomous destination ----------------
+                Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                    Image(
+                        painter = painterResource(R.drawable.lab_guide),
+                        contentDescription = null,
+                        modifier = Modifier.weight(1f).height(240.dp).clip(RoundedCornerShape(16.dp)),
+                        contentScale = ContentScale.Crop
+                    )
+                    Column(Modifier.weight(1f)) {
+                        Text(selD.title(german), color = LText, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            t("G1 finds its own way on the LiDAR map, walks you there and then returns to its place. " +
+                                "If something blocks the way, it walks around it.",
+                              "G1 findet selbst den Weg auf der LiDAR-Karte, bringt Sie dorthin und kehrt danach zurück. " +
+                                "Ist der Weg versperrt, geht G1 außen herum."),
+                            color = LMuted, fontSize = 15.sp
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.AutoAwesome, null, tint = LGreen, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(t("Autonomous walking", "Autonomes Gehen"), color = LGreen, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+                error?.let {
+                    Text(t("G1 can't start right now: $it", "G1 kann gerade nicht starten: $it"),
+                        color = Color(0xFFB42020), fontWeight = FontWeight.SemiBold)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedButton(onClick = { selectedDest = null }, contentPadding = PaddingValues(horizontal = 22.dp, vertical = 16.dp)) {
+                        Text(t("Back", "Zurück"), fontSize = 16.sp, color = LText)
+                    }
+                    Button(
+                        onClick = {
+                            starting = true
+                            error = null
+                            scope.launch {
+                                val err = G1GuideApi.goto(selD.name, german)
+                                starting = false
+                                if (err == null) onStarted(selD.title(german)) else error = err
+                            }
+                        },
+                        enabled = !starting,
+                        colors = ButtonDefaults.buttonColors(containerColor = LGreen),
+                        contentPadding = PaddingValues(horizontal = 30.dp, vertical = 16.dp)
+                    ) {
+                        Text(if (starting) t("Starting…", "Startet…") else t("Take me there", "Bring mich hin"),
+                            fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
             loading && routes.isEmpty() -> Text(t("Loading destinations…", "Ziele werden geladen…"), color = LMuted)
 
             offline -> Surface(color = Color(0xFFFFF6E5), shape = RoundedCornerShape(12.dp)) {
@@ -91,9 +158,39 @@ fun RealLabGuideScreen(german: Boolean, onBack: () -> Unit, onStarted: (title: S
                 )
             }
 
-            routes.isEmpty() -> Text(t("No destinations taught yet.", "Noch keine Ziele eingelernt."), color = LMuted)
+            routes.isEmpty() && dests.isEmpty() -> Text(t("No destinations taught yet.", "Noch keine Ziele eingelernt."), color = LMuted)
 
-            sel == null -> routes.forEach { r ->
+            sel == null -> Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+              if (dests.isNotEmpty()) {
+                Text(t("Go anywhere – G1 finds the way", "Überallhin – G1 findet den Weg"),
+                    color = LText, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                dests.chunked(3).forEach { rowItems ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        rowItems.forEach { d ->
+                            Row(
+                                Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(Color.White)
+                                    .border(1.dp, Color(0xFFE4E8EB), RoundedCornerShape(14.dp))
+                                    .clickable { selectedDest = d; error = null }
+                                    .padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Place, null, tint = LGreen, modifier = Modifier.size(24.dp))
+                                Spacer(Modifier.width(10.dp))
+                                Text(d.title(german), color = LText, fontSize = 17.sp, fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.weight(1f))
+                                Text("›", color = LMuted, fontSize = 26.sp)
+                            }
+                        }
+                        repeat(3 - rowItems.size) { Spacer(Modifier.weight(1f)) }
+                    }
+                }
+                Text(t("Recorded tours & routes", "Eingelernte Führungen & Wege"),
+                    color = LText, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+              }
+              routes.forEach { r ->
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -128,6 +225,7 @@ fun RealLabGuideScreen(german: Boolean, onBack: () -> Unit, onStarted: (title: S
                     }
                     Text("›", color = LMuted, fontSize = 34.sp, modifier = Modifier.padding(end = 18.dp))
                 }
+              }
             }
 
             else -> {
